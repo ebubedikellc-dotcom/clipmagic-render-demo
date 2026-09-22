@@ -1,0 +1,101 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#07111f">
+  <title>ClipMagic Owner Control Panel</title>
+  <meta name="description" content="Owner controls for ClipMagic fuel, pricing, payments and customers.">
+  <link rel="icon" type="image/svg+xml" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='16' fill='%2307111f'/%3E%3Cpath d='M18 17l28 15-28 15V17z' fill='%232cb4f3'/%3E%3Cpath d='M35 17l-8 30' stroke='white' stroke-width='5' stroke-linecap='round'/%3E%3C/svg%3E">
+  <style>
+    :root{--bg:#07111f;--panel:#0d1a2b;--panel2:#101f33;--line:#21334d;--text:#f5f8ff;--muted:#91a4bf;--cyan:#2cb4f3;--cyan2:#70d2ff;--green:#32d583;--red:#ff6b7d;--gold:#ffd36b;--shadow:0 22px 55px rgba(0,0,0,.28)}
+    *{box-sizing:border-box}body{margin:0;background:radial-gradient(circle at 75% -5%,rgba(44,180,243,.13),transparent 31%),var(--bg);color:var(--text);font-family:Inter,ui-sans-serif,system-ui,-apple-system,BlinkMacSystemFont,"Segoe UI",sans-serif;min-height:100vh}button,input{font:inherit}button{cursor:pointer}.shell{max-width:1240px;margin:auto;padding:28px 26px 70px}
+    header{display:flex;align-items:center;justify-content:space-between;gap:18px;margin-bottom:30px}.brand{display:flex;align-items:center;gap:13px}.mark{width:44px;height:44px;border-radius:14px;background:linear-gradient(145deg,var(--cyan),#0875d1);display:grid;place-items:center;box-shadow:0 9px 25px rgba(44,180,243,.26)}.mark:before{content:"";border-left:15px solid white;border-top:9px solid transparent;border-bottom:9px solid transparent;margin-left:4px}.brand strong{font-size:1.08rem;letter-spacing:.08em}.brand span{color:var(--cyan2)}.back{color:#ccecff;text-decoration:none;border:1px solid var(--line);padding:10px 14px;border-radius:12px;background:rgba(13,26,43,.75);font-weight:800}
+    .intro{display:flex;justify-content:space-between;align-items:end;gap:20px;margin-bottom:22px}.eyebrow{color:var(--cyan);letter-spacing:.2em;text-transform:uppercase;font-size:.78rem;font-weight:850;margin:0 0 8px}.intro h1{font-size:clamp(2rem,5vw,3.7rem);line-height:1;margin:0;letter-spacing:-.05em}.intro p{color:var(--muted);max-width:580px;line-height:1.55;margin:13px 0 0}.save{border:0;border-radius:14px;min-height:52px;padding:0 22px;background:var(--cyan);color:#06121f;font-weight:900}.grid{display:grid;grid-template-columns:1.1fr .9fr;gap:18px;align-items:start}.stack{display:grid;gap:18px}.card{background:linear-gradient(145deg,rgba(16,31,51,.98),rgba(10,22,38,.98));border:1px solid var(--line);border-radius:22px;box-shadow:var(--shadow);padding:22px}.card h2{font-size:1.2rem;margin:0}.hint{color:var(--muted);font-size:.9rem;line-height:1.45;margin:7px 0 0}.head{display:flex;justify-content:space-between;align-items:center;gap:14px;margin-bottom:18px}
+    .master{display:flex;align-items:center;gap:12px;border:1px solid rgba(50,213,131,.28);background:rgba(50,213,131,.08);padding:14px;border-radius:16px}.switch{position:relative;width:58px;height:32px;flex:0 0 auto}.switch input{opacity:0;width:0;height:0}.slider{position:absolute;inset:0;background:#34445c;border-radius:999px;transition:.2s}.slider:before{content:"";position:absolute;width:24px;height:24px;left:4px;top:4px;border-radius:50%;background:#fff;transition:.2s}.switch input:checked+.slider{background:var(--green)}.switch input:checked+.slider:before{transform:translateX(26px)}.master b{display:block}.master span{display:block;color:var(--muted);font-size:.82rem;margin-top:3px}
+    label{display:block;color:#c2cede;font-size:.82rem;font-weight:850;letter-spacing:.07em;text-transform:uppercase;margin-bottom:7px}input{width:100%;min-height:46px;padding:11px 13px;border:1px solid #2a3c57;background:#071321;color:var(--text);border-radius:12px;outline:none}input:focus{border-color:var(--cyan);box-shadow:0 0 0 3px rgba(44,180,243,.1)}.fields{display:grid;grid-template-columns:1fr 1fr;gap:12px}.field.full{grid-column:1/-1}.owner-badge{display:flex;gap:10px;align-items:flex-start;color:#8aefbb;background:rgba(50,213,131,.08);border:1px solid rgba(50,213,131,.24);padding:12px;border-radius:13px;margin-top:13px;font-size:.86rem;line-height:1.45}.owner-badge b{color:#c9ffe2}
+    .prices{display:grid;grid-template-columns:1fr 130px;gap:10px;align-items:center}.prices+.prices{margin-top:9px}.prices span{font-size:.91rem}.price-input{position:relative}.price-input:before{content:"₦";position:absolute;left:12px;top:12px;color:var(--muted)}.price-input input{padding-left:29px}
+    .packages{display:grid;gap:10px}.package{display:grid;grid-template-columns:1fr 1fr 1fr;gap:9px;border:1px solid var(--line);padding:11px;border-radius:14px;background:rgba(5,15,27,.4)}
+    .methods{display:grid;gap:10px}.method{display:flex;align-items:center;justify-content:space-between;border:1px solid var(--line);padding:12px;border-radius:14px}.method label{margin:0;color:var(--text);text-transform:none;letter-spacing:0}.method input{width:21px;min-height:21px;accent-color:var(--green)}
+    .stats{display:grid;grid-template-columns:repeat(3,1fr);gap:10px;margin-bottom:18px}.stat{border:1px solid var(--line);background:rgba(5,15,27,.46);padding:14px;border-radius:15px}.stat b{font-size:1.45rem;display:block}.stat span{font-size:.78rem;color:var(--muted)}
+    .customers{display:grid;gap:9px}.customer{display:grid;grid-template-columns:minmax(0,1fr) auto auto;gap:10px;align-items:center;border-top:1px solid var(--line);padding-top:11px}.customer:first-child{border-top:0;padding-top:0}.customer b{display:block;font-size:.9rem}.customer small{color:var(--muted)}.balance{color:var(--gold);font-weight:850;font-size:.86rem}.tiny{border:1px solid #2c405d;background:#192b43;color:#dbe7f7;border-radius:10px;min-height:37px;padding:0 11px;font-weight:800}
+    .notice{color:var(--muted);font-size:.8rem;line-height:1.5;margin:16px 0 0}.toast{position:fixed;right:24px;bottom:24px;background:#e8fff4;color:#075d36;padding:14px 17px;border-radius:13px;font-weight:800;box-shadow:0 15px 40px rgba(0,0,0,.3);opacity:0;transform:translateY(16px);pointer-events:none;transition:.25s}.toast.show{opacity:1;transform:none}
+    @media(max-width:850px){.grid{grid-template-columns:1fr}.intro{align-items:stretch;flex-direction:column}.intro .save{width:100%}}
+    @media(max-width:580px){.shell{padding:20px 14px 55px}header{align-items:flex-start}.brand strong{font-size:.9rem}.back{font-size:.82rem;padding:9px}.card{padding:18px;border-radius:19px}.fields{grid-template-columns:1fr}.field.full{grid-column:auto}.package{grid-template-columns:1fr}.stats{grid-template-columns:1fr}.customer{grid-template-columns:1fr auto}.customer .tiny{grid-column:1/-1}.toast{left:14px;right:14px;text-align:center}}
+  </style>
+</head>
+<body>
+  <main class="shell">
+    <header><div class="brand"><div class="mark"></div><strong>CLIP<span>MAGIC</span> OWNER</strong></div><a class="back" href="/">Open main site</a></header>
+    <section class="intro"><div><p class="eyebrow">Private owner control panel</p><h1>Fuel, prices and payments.</h1><p>Control how customers pay while your owner account remains free and unlimited.</p></div><button class="save" id="saveAll">Save all settings</button></section>
+    <div class="grid">
+      <div class="stack">
+        <section class="card">
+          <div class="head"><div><h2>Monetization power</h2><p class="hint">Turn customer fuel charges on or off instantly.</p></div></div>
+          <div class="master"><label class="switch"><input id="monetization" type="checkbox"><span class="slider"></span></label><div><b id="powerTitle">Monetization is ON</b><span id="powerText">Customers must buy fuel to use paid actions.</span></div></div>
+        </section>
+
+        <section class="card">
+          <div class="head"><div><h2>Owner account</h2><p class="hint">This account receives every feature without fuel charges.</p></div></div>
+          <div class="fields"><div class="field full"><label for="ownerEmail">Owner email</label><input id="ownerEmail" type="email" value="owner@clipmagic.ai"></div><div class="field full"><label for="ownerPassword">Owner password</label><input id="ownerPassword" type="password" placeholder="Choose a private password"></div></div>
+          <div class="owner-badge">✓ <span><b>Permanent owner bypass</b><br>This email is never charged, even when monetization is ON.</span></div>
+        </section>
+
+        <section class="card">
+          <div class="head"><div><h2>Price every action</h2><p class="hint">Change what ClipMagic deducts from customer fuel.</p></div></div>
+          <div id="priceList"></div>
+        </section>
+
+        <section class="card">
+          <div class="head"><div><h2>Fuel packages</h2><p class="hint">Customers choose one of these packages on the main site.</p></div></div>
+          <div class="packages" id="packages"></div>
+        </section>
+      </div>
+
+      <div class="stack">
+        <section class="card">
+          <div class="head"><div><h2>Payment methods</h2><p class="hint">Choose which payment choices customers can see.</p></div></div>
+          <div class="methods"><div class="method"><label for="payCard">💳 Card payment</label><input id="payCard" type="checkbox"></div><div class="method"><label for="payTransfer">🏦 Bank transfer</label><input id="payTransfer" type="checkbox"></div><div class="method"><label for="payCash">💵 Cash / manual approval</label><input id="payCash" type="checkbox"></div></div>
+          <div class="fields" style="margin-top:14px"><div><label for="bankName">Bank</label><input id="bankName"></div><div><label for="accountNumber">Account number</label><input id="accountNumber"></div><div class="field full"><label for="accountName">Account name</label><input id="accountName"></div></div>
+        </section>
+
+        <section class="card">
+          <div class="head"><div><h2>Customers and fuel</h2><p class="hint">Add fuel manually after receiving cash or a direct transfer.</p></div></div>
+          <div class="stats"><div class="stat"><b>3</b><span>Customers</span></div><div class="stat"><b>₦35k</b><span>Demo sales</span></div><div class="stat"><b>2</b><span>Running</span></div></div>
+          <div class="customers" id="customers"></div>
+        </section>
+
+        <section class="card">
+          <div class="head"><div><h2>Unpaid-video promotion</h2><p class="hint">Show your service promotion on customer videos until they buy removal.</p></div></div>
+          <div class="method"><label for="showPromotion">Show promotion for unpaid customers</label><input id="showPromotion" type="checkbox"></div>
+          <p class="notice">Your owner videos remain clean. The customer’s own page name and Follow button are not removed.</p>
+        </section>
+      </div>
+    </div>
+    <p class="notice">Interactive visual demo. Real logins and payments will require secure server setup before customer launch.</p>
+  </main>
+  <div class="toast" id="toast"></div>
+  <script>
+    const defaultSettings={enabled:true,balance:7200,ownerEmail:'owner@clipmagic.ai',packages:[{name:'Starter',fuel:5000,price:5000},{name:'Creator',fuel:12000,price:10000},{name:'Pro',fuel:30000,price:20000}],costs:{clip:50,post:20,streamHour:100,oldVideo:30,captions:10,sound:10,title:10,extraConnection:500,removeAd:1000},payments:{card:true,transfer:true,cash:true},bank:{bank:'Demo Bank',account:'0123456789',name:'ClipMagic Media'},showPromotion:true};
+    const priceLabels={clip:'Create one clip',post:'Post to one platform',streamHour:'Monitor new videos for one hour',oldVideo:'Import one old video',captions:'Add captions',sound:'Add background sound',title:'Generate title',extraConnection:'Extra clipping connection',removeAd:'Remove video promotion'};
+    const demoCustomers=[{name:'Ada Sports TV',email:'ada@example.com',fuel:3400},{name:'Viral Moments NG',email:'viral@example.com',fuel:850},{name:'GameDay Clips',email:'game@example.com',fuel:0}];
+    function getSettings(){try{const saved=JSON.parse(localStorage.getItem('clipmagicBilling')||'{}');return {...defaultSettings,...saved,costs:{...defaultSettings.costs,...saved.costs},payments:{...defaultSettings.payments,...saved.payments},bank:{...defaultSettings.bank,...saved.bank},packages:saved.packages||defaultSettings.packages}}catch{return defaultSettings}}
+    let settings=getSettings();
+    const toast=document.getElementById('toast');function say(message){toast.textContent=message;toast.classList.add('show');clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>toast.classList.remove('show'),2300)}
+    function render(){
+      document.getElementById('monetization').checked=settings.enabled;document.getElementById('ownerEmail').value=settings.ownerEmail;document.getElementById('payCard').checked=settings.payments.card;document.getElementById('payTransfer').checked=settings.payments.transfer;document.getElementById('payCash').checked=settings.payments.cash;document.getElementById('bankName').value=settings.bank.bank;document.getElementById('accountNumber').value=settings.bank.account;document.getElementById('accountName').value=settings.bank.name;document.getElementById('showPromotion').checked=settings.showPromotion;
+      document.getElementById('priceList').innerHTML=Object.entries(priceLabels).map(([key,label])=>'<div class="prices"><span>'+label+'</span><div class="price-input"><input type="number" min="0" data-cost="'+key+'" value="'+settings.costs[key]+'"></div></div>').join('');
+      document.getElementById('packages').innerHTML=settings.packages.map((item,index)=>'<div class="package"><div><label>Package name</label><input data-package="'+index+'" data-field="name" value="'+item.name+'"></div><div><label>Fuel amount</label><input type="number" min="0" data-package="'+index+'" data-field="fuel" value="'+item.fuel+'"></div><div><label>Price (₦)</label><input type="number" min="0" data-package="'+index+'" data-field="price" value="'+item.price+'"></div></div>').join('');
+      document.getElementById('customers').innerHTML=demoCustomers.map((item,index)=>'<div class="customer"><div><b>'+item.name+'</b><small>'+item.email+'</small></div><span class="balance">'+item.fuel.toLocaleString()+' fuel</span><button class="tiny" data-customer="'+index+'">+ 1,000 fuel</button></div>').join('');updatePower();
+    }
+    function updatePower(){const on=document.getElementById('monetization').checked;document.getElementById('powerTitle').textContent='Monetization is '+(on?'ON':'OFF');document.getElementById('powerText').textContent=on?'Customers must buy fuel to use paid actions.':'Fuel and payment controls are hidden from customers.'}
+    document.getElementById('monetization').addEventListener('change',updatePower);
+    document.getElementById('customers').addEventListener('click',event=>{const button=event.target.closest('[data-customer]');if(!button)return;demoCustomers[Number(button.dataset.customer)].fuel+=1000;render();say('1,000 fuel added manually')});
+    document.getElementById('saveAll').addEventListener('click',()=>{
+      settings.enabled=document.getElementById('monetization').checked;settings.ownerEmail=document.getElementById('ownerEmail').value.trim()||defaultSettings.ownerEmail;settings.payments={card:document.getElementById('payCard').checked,transfer:document.getElementById('payTransfer').checked,cash:document.getElementById('payCash').checked};settings.bank={bank:document.getElementById('bankName').value.trim(),account:document.getElementById('accountNumber').value.trim(),name:document.getElementById('accountName').value.trim()};settings.showPromotion=document.getElementById('showPromotion').checked;
+      document.querySelectorAll('[data-cost]').forEach(input=>settings.costs[input.dataset.cost]=Number(input.value||0));document.querySelectorAll('[data-package]').forEach(input=>{const index=Number(input.dataset.package);const field=input.dataset.field;settings.packages[index][field]=field==='name'?input.value:Number(input.value||0)});localStorage.setItem('clipmagicBilling',JSON.stringify(settings));say('All settings saved — main site updated')
+    });
+    render();
+  </script>
+</body>
+</html>

@@ -1,0 +1,9 @@
+services:
+  - type: web
+    name: clipmagic-demo
+    runtime: static
+    rootDir: .
+    buildCommand: ""
+    staticPublishPath: .
+    pullRequestPreviewsEnabled: false
+

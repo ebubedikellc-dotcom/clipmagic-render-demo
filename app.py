@@ -383,13 +383,16 @@ async def get_customer_apis(request: Request):
     with database() as connection:
         rows = connection.execute("SELECT platform, encrypted_data FROM api_credentials WHERE user_id = ?", (customer["id"],)).fetchall()
     configured = {}
+    links = {}
     for row in rows:
         try:
             data = json.loads(API_CIPHER.decrypt(row["encrypted_data"].encode()).decode())
             configured[row["platform"]] = {key: bool(value) for key, value in data.items()}
+            if data.get("account_link"):
+                links[row["platform"]] = data["account_link"]
         except Exception:
             configured[row["platform"]] = {}
-    return {"email": customer["email"], "configured": configured}
+    return {"email": customer["email"], "configured": configured, "links": links}
 
 
 @app.post("/api/customer/apis")
@@ -398,7 +401,7 @@ async def save_customer_apis(request: Request):
     if not customer:
         raise HTTPException(401, "Please log in")
     payload = await request.json()
-    allowed = {"meta", "youtube", "tiktok", "x", "ai"}
+    allowed = {"facebook", "instagram", "youtube", "tiktok", "snapchat", "x", "rumble", "dailymotion", "ai"}
     saved = []
     with database() as connection:
         for platform, values in payload.items():
@@ -407,6 +410,17 @@ async def save_customer_apis(request: Request):
             clean = {str(key)[:40]: str(value).strip()[:4000] for key, value in values.items() if str(value).strip()}
             if not clean:
                 continue
+            existing = connection.execute(
+                "SELECT encrypted_data FROM api_credentials WHERE user_id = ? AND platform = ?",
+                (customer["id"], platform),
+            ).fetchone()
+            if existing:
+                try:
+                    previous = json.loads(API_CIPHER.decrypt(existing["encrypted_data"].encode()).decode())
+                    previous.update(clean)
+                    clean = previous
+                except Exception:
+                    pass
             encrypted = API_CIPHER.encrypt(json.dumps(clean).encode()).decode()
             connection.execute(
                 "INSERT INTO api_credentials (user_id, platform, encrypted_data, updated_at) VALUES (?, ?, ?, ?) "

@@ -333,7 +333,7 @@ async def customer_register(email: str = Form(...), password: str = Form(...)):
             user_id = cursor.lastrowid
     except sqlite3.IntegrityError:
         return customer_page("customer-register.html", "That email is already registered. Please log in.")
-    response = RedirectResponse("/my-account", status_code=303)
+    response = RedirectResponse("/", status_code=303)
     response.set_cookie(CUSTOMER_COOKIE, create_customer_session(user_id, email), max_age=60 * 60 * 24 * 30,
                         httponly=True, secure=True, samesite="strict")
     return response
@@ -353,7 +353,7 @@ async def customer_login(email: str = Form(...), password: str = Form(...)):
         row = connection.execute("SELECT id, email, password_hash FROM users WHERE email = ?", (email,)).fetchone()
     if not row or not check_password(password, row["password_hash"]):
         return customer_page("customer-login.html", "The email or password is incorrect.")
-    response = RedirectResponse("/my-account", status_code=303)
+    response = RedirectResponse("/", status_code=303)
     response.set_cookie(CUSTOMER_COOKIE, create_customer_session(row["id"], row["email"]), max_age=60 * 60 * 24 * 30,
                         httponly=True, secure=True, samesite="strict")
     return response
@@ -371,8 +371,7 @@ async def my_account(request: Request):
     customer = current_customer(request)
     if not customer:
         return RedirectResponse("/login", status_code=303)
-    template = (BASE_DIR / "customer-account.html").read_text(encoding="utf-8")
-    return HTMLResponse(template.replace("{{CUSTOMER_EMAIL}}", customer["email"]))
+    return RedirectResponse("/", status_code=303)
 
 
 @app.get("/api/customer/apis")

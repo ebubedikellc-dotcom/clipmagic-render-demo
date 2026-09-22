@@ -21,7 +21,7 @@
     .mark:before{content:"";border-left:15px solid white;border-top:9px solid transparent;border-bottom:9px solid transparent;margin-left:4px}
     .brand strong{font-size:1.12rem;letter-spacing:.11em}.brand span{color:var(--cyan2)}
     .status{border:1px solid var(--line);background:rgba(13,26,43,.75);border-radius:999px;padding:10px 15px;color:var(--muted);display:flex;gap:9px;align-items:center;font-size:.9rem}
-    .header-right{display:flex;gap:9px;align-items:center}.fuel-badge{border:1px solid rgba(50,213,131,.32);background:rgba(50,213,131,.09);border-radius:999px;padding:10px 14px;color:#8aefbb;font-size:.86rem;font-weight:850}
+    .header-right{display:flex;gap:9px;align-items:center}.account-link{border:1px solid var(--line);background:rgba(13,26,43,.8);color:#d9efff;text-decoration:none;border-radius:999px;padding:10px 14px;font-size:.84rem;font-weight:850}.account-link.primary{background:var(--cyan);color:#06121f;border-color:var(--cyan)}.fuel-badge{border:1px solid rgba(50,213,131,.32);background:rgba(50,213,131,.09);border-radius:999px;padding:10px 14px;color:#8aefbb;font-size:.86rem;font-weight:850}
     .dot{width:8px;height:8px;border-radius:50%;background:#64748b}.dot.live{background:var(--green);box-shadow:0 0 0 5px rgba(50,213,131,.1)}
     .topline{display:grid;grid-template-columns:1fr auto;gap:24px;align-items:end;margin-bottom:28px}
     .eyebrow{color:var(--cyan);letter-spacing:.22em;text-transform:uppercase;font-size:.78rem;font-weight:800;margin:0 0 10px}
@@ -79,7 +79,7 @@
   <main class="shell">
     <header>
       <div class="brand"><div class="mark" aria-hidden="true"></div><strong>CLIP<span>MAGIC</span> AI</strong></div>
-      <div class="header-right"><div class="fuel-badge" id="fuelHeader">⛽ 7,200 fuel</div><div class="status"><i class="dot" id="topDot"></i><span class="status-copy" id="topStatus">Ready to connect</span></div></div>
+      <div class="header-right"><a class="account-link" href="/login">Log in</a><a class="account-link primary" href="/register">Register</a><div class="fuel-badge" id="fuelHeader">⛽ 7,200 fuel</div><div class="status"><i class="dot" id="topDot"></i><span class="status-copy" id="topStatus">Ready to connect</span></div></div>
     </header>
 
     <section class="topline">

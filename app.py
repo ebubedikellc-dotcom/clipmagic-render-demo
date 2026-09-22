@@ -8,12 +8,14 @@ import json
 import os
 import re
 import shutil
+import sqlite3
 import subprocess
 import threading
 import time
 import uuid
 from pathlib import Path
 
+from cryptography.fernet import Fernet
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -30,12 +32,85 @@ SESSION_SECRET = os.environ.get("CLIPMAGIC_SESSION_SECRET") or hashlib.sha256(
     f"clipmagic-session|{OWNER_PASSWORD}".encode()
 ).hexdigest()
 SESSION_COOKIE = "clipmagic_owner_session"
+CUSTOMER_COOKIE = "clipmagic_customer_session"
+DATABASE_PATH = Path(os.environ.get("CLIPMAGIC_DATABASE_PATH", str(WORK_ROOT / "clipmagic-users.db")))
+API_SECRET = os.environ.get("CLIPMAGIC_API_ENCRYPTION_KEY") or SESSION_SECRET
+API_CIPHER = Fernet(base64.urlsafe_b64encode(hashlib.sha256(API_SECRET.encode()).digest()))
 
 WORK_ROOT.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="ClipMagic Engine", version="1.0.0")
 jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
+
+
+def database() -> sqlite3.Connection:
+    connection = sqlite3.connect(DATABASE_PATH)
+    connection.row_factory = sqlite3.Row
+    return connection
+
+
+def initialize_database() -> None:
+    DATABASE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with database() as connection:
+        connection.executescript(
+            """
+            CREATE TABLE IF NOT EXISTS users (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                email TEXT UNIQUE NOT NULL,
+                password_hash TEXT NOT NULL,
+                created_at INTEGER NOT NULL
+            );
+            CREATE TABLE IF NOT EXISTS api_credentials (
+                user_id INTEGER NOT NULL,
+                platform TEXT NOT NULL,
+                encrypted_data TEXT NOT NULL,
+                updated_at INTEGER NOT NULL,
+                PRIMARY KEY (user_id, platform),
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            """
+        )
+
+
+def hash_password(password: str) -> str:
+    salt = os.urandom(16)
+    digest = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 240_000)
+    return f"{base64.urlsafe_b64encode(salt).decode()}:{base64.urlsafe_b64encode(digest).decode()}"
+
+
+def check_password(password: str, stored: str) -> bool:
+    try:
+        salt_text, digest_text = stored.split(":", 1)
+        salt = base64.urlsafe_b64decode(salt_text.encode())
+        expected = base64.urlsafe_b64decode(digest_text.encode())
+        actual = hashlib.pbkdf2_hmac("sha256", password.encode(), salt, 240_000)
+        return hmac.compare_digest(actual, expected)
+    except (ValueError, TypeError, base64.binascii.Error):
+        return False
+
+
+def create_customer_session(user_id: int, email: str) -> str:
+    expires = str(int(time.time()) + 60 * 60 * 24 * 30)
+    payload = f"{user_id}|{email}|{expires}"
+    signature = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{payload}|{signature}".encode()).decode()
+
+
+def current_customer(request: Request) -> dict | None:
+    token = request.cookies.get(CUSTOMER_COOKIE, "")
+    try:
+        decoded = base64.urlsafe_b64decode(token.encode()).decode()
+        user_id, email, expires, signature = decoded.rsplit("|", 3)
+        payload = f"{user_id}|{email}|{expires}"
+        expected = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        if int(expires) <= int(time.time()) or not hmac.compare_digest(signature, expected):
+            return None
+        with database() as connection:
+            row = connection.execute("SELECT id, email FROM users WHERE id = ? AND email = ?", (int(user_id), email)).fetchone()
+        return dict(row) if row else None
+    except (ValueError, TypeError, base64.binascii.Error):
+        return None
 
 
 def create_owner_session() -> str:
@@ -171,6 +246,7 @@ def cleanup_expired() -> None:
 
 @app.on_event("startup")
 async def startup() -> None:
+    initialize_database()
     threading.Thread(target=cleanup_expired, daemon=True).start()
 
 
@@ -226,6 +302,119 @@ async def owner_control_panel(request: Request):
     if not valid_owner_session(request):
         return RedirectResponse("/owner-login", status_code=303)
     return FileResponse(BASE_DIR / "control-panel.html")
+
+
+def customer_page(filename: str, message: str = "") -> HTMLResponse:
+    template = (BASE_DIR / filename).read_text(encoding="utf-8")
+    message_html = f'<div class="message">{message}</div>' if message else ""
+    return HTMLResponse(template.replace("{{MESSAGE}}", message_html))
+
+
+@app.get("/register")
+async def customer_register_page(request: Request):
+    if current_customer(request):
+        return RedirectResponse("/my-account", status_code=303)
+    return customer_page("customer-register.html")
+
+
+@app.post("/register")
+async def customer_register(email: str = Form(...), password: str = Form(...)):
+    email = email.strip().lower()
+    if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
+        return customer_page("customer-register.html", "Enter a valid email address.")
+    if len(password) < 6:
+        return customer_page("customer-register.html", "Password must contain at least 6 characters.")
+    try:
+        with database() as connection:
+            cursor = connection.execute(
+                "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
+                (email, hash_password(password), int(time.time())),
+            )
+            user_id = cursor.lastrowid
+    except sqlite3.IntegrityError:
+        return customer_page("customer-register.html", "That email is already registered. Please log in.")
+    response = RedirectResponse("/my-account", status_code=303)
+    response.set_cookie(CUSTOMER_COOKIE, create_customer_session(user_id, email), max_age=60 * 60 * 24 * 30,
+                        httponly=True, secure=True, samesite="strict")
+    return response
+
+
+@app.get("/login")
+async def customer_login_page(request: Request):
+    if current_customer(request):
+        return RedirectResponse("/my-account", status_code=303)
+    return customer_page("customer-login.html")
+
+
+@app.post("/login")
+async def customer_login(email: str = Form(...), password: str = Form(...)):
+    email = email.strip().lower()
+    with database() as connection:
+        row = connection.execute("SELECT id, email, password_hash FROM users WHERE email = ?", (email,)).fetchone()
+    if not row or not check_password(password, row["password_hash"]):
+        return customer_page("customer-login.html", "The email or password is incorrect.")
+    response = RedirectResponse("/my-account", status_code=303)
+    response.set_cookie(CUSTOMER_COOKIE, create_customer_session(row["id"], row["email"]), max_age=60 * 60 * 24 * 30,
+                        httponly=True, secure=True, samesite="strict")
+    return response
+
+
+@app.post("/logout")
+async def customer_logout():
+    response = RedirectResponse("/login", status_code=303)
+    response.delete_cookie(CUSTOMER_COOKIE)
+    return response
+
+
+@app.get("/my-account")
+async def my_account(request: Request):
+    customer = current_customer(request)
+    if not customer:
+        return RedirectResponse("/login", status_code=303)
+    template = (BASE_DIR / "customer-account.html").read_text(encoding="utf-8")
+    return HTMLResponse(template.replace("{{CUSTOMER_EMAIL}}", customer["email"]))
+
+
+@app.get("/api/customer/apis")
+async def get_customer_apis(request: Request):
+    customer = current_customer(request)
+    if not customer:
+        raise HTTPException(401, "Please log in")
+    with database() as connection:
+        rows = connection.execute("SELECT platform, encrypted_data FROM api_credentials WHERE user_id = ?", (customer["id"],)).fetchall()
+    configured = {}
+    for row in rows:
+        try:
+            data = json.loads(API_CIPHER.decrypt(row["encrypted_data"].encode()).decode())
+            configured[row["platform"]] = {key: bool(value) for key, value in data.items()}
+        except Exception:
+            configured[row["platform"]] = {}
+    return {"email": customer["email"], "configured": configured}
+
+
+@app.post("/api/customer/apis")
+async def save_customer_apis(request: Request):
+    customer = current_customer(request)
+    if not customer:
+        raise HTTPException(401, "Please log in")
+    payload = await request.json()
+    allowed = {"meta", "youtube", "tiktok", "x", "ai"}
+    saved = []
+    with database() as connection:
+        for platform, values in payload.items():
+            if platform not in allowed or not isinstance(values, dict):
+                continue
+            clean = {str(key)[:40]: str(value).strip()[:4000] for key, value in values.items() if str(value).strip()}
+            if not clean:
+                continue
+            encrypted = API_CIPHER.encrypt(json.dumps(clean).encode()).decode()
+            connection.execute(
+                "INSERT INTO api_credentials (user_id, platform, encrypted_data, updated_at) VALUES (?, ?, ?, ?) "
+                "ON CONFLICT(user_id, platform) DO UPDATE SET encrypted_data=excluded.encrypted_data, updated_at=excluded.updated_at",
+                (customer["id"], platform, encrypted, int(time.time())),
+            )
+            saved.append(platform)
+    return {"saved": saved, "message": "Your API details were saved privately."}
 
 
 @app.post("/api/jobs")

@@ -6,4 +6,15 @@ services:
     buildCommand: ""
     staticPublishPath: .
     pullRequestPreviewsEnabled: false
-
+  - type: web
+    name: clipmagic-engine
+    runtime: docker
+    plan: free
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    autoDeploy: true
+    envVars:
+      - key: CLIPMAGIC_JOB_TTL_SECONDS
+        value: "3600"
+      - key: CLIPMAGIC_MAX_UPLOAD_MB
+        value: "250"

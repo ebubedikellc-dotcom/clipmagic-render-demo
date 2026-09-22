@@ -68,10 +68,11 @@
     .assurance{display:flex;justify-content:center;gap:7px;align-items:center;color:var(--muted);font-size:.8rem;margin-top:12px}
     .activity{margin-top:20px;padding:20px 22px}.activity-head{display:flex;justify-content:space-between;align-items:center;margin-bottom:15px}.activity-head span{color:var(--muted);font-size:.84rem}
     .feed{display:grid;gap:10px}.feed-row{display:flex;align-items:center;gap:12px;border-top:1px solid rgba(42,61,87,.65);padding-top:12px}.feed-row:first-child{border-top:0;padding-top:0}.thumb{width:54px;height:45px;border-radius:10px;background:linear-gradient(145deg,#25425f,#101d2d);display:grid;place-items:center;color:var(--cyan)}.feed-row b{font-size:.9rem}.feed-row small{display:block;color:var(--muted);margin-top:4px}.feed-row .done{margin-left:auto;color:var(--green);font-size:.78rem}
-    .demo-note{margin:22px auto 0;text-align:center;color:#7286a2;font-size:.8rem}
+    .engine-card{margin-bottom:20px;padding:24px;border-color:rgba(44,180,243,.55);background:linear-gradient(135deg,rgba(44,180,243,.12),rgba(50,213,131,.06)),var(--panel)}
+    .engine-card h2{font-size:1.55rem}.engine-copy{color:var(--muted);line-height:1.55;margin:8px 0 18px}.engine-form{display:grid;grid-template-columns:1.25fr 1fr 1fr;gap:12px}.engine-form .wide{grid-column:1/-1}.engine-form .submit{grid-column:1/-1}.engine-state{margin-top:16px;padding:14px 16px;border:1px solid var(--line);border-radius:14px;background:rgba(5,15,27,.55);color:var(--muted)}.engine-state strong{display:block;color:var(--text);margin-bottom:5px}.progress{height:9px;background:#071321;border-radius:99px;overflow:hidden;margin-top:11px}.progress span{display:block;height:100%;width:0;background:linear-gradient(90deg,var(--cyan),var(--green));transition:.25s}.clip-results{display:grid;grid-template-columns:repeat(3,1fr);gap:12px;margin-top:16px}.clip-result{padding:13px;border:1px solid var(--line);border-radius:15px;background:rgba(5,15,27,.58)}.clip-result video{width:100%;aspect-ratio:9/16;border-radius:11px;background:#02070d;max-height:380px}.clip-result b{display:block;margin:9px 0}.clip-result a{display:block;text-align:center;text-decoration:none;padding:10px;border-radius:10px;background:var(--cyan);color:#06121f;font-weight:900}.truth-note{margin:16px 0 0;color:#ffd36b;font-size:.85rem;line-height:1.5}.demo-note{margin:22px auto 0;text-align:center;color:#93a5bd;font-size:.84rem}
     .toast{position:fixed;right:24px;bottom:24px;background:#e8fff4;color:#075d36;padding:14px 17px;border-radius:13px;font-weight:800;box-shadow:0 15px 40px rgba(0,0,0,.3);opacity:0;transform:translateY(16px);pointer-events:none;transition:.25s}.toast.show{opacity:1;transform:none}
-    @media(max-width:900px){.grid{grid-template-columns:1fr}.start-card{position:static}.preview{aspect-ratio:16/10}.topline{grid-template-columns:1fr}.mini-stats{display:none}}
-    @media(max-width:620px){.shell{padding:20px 14px 55px}header{margin-bottom:28px}.brand strong{font-size:1rem}.header-right{gap:5px}.fuel-badge{padding:8px 10px}.status{padding:8px 11px}.status .status-copy{display:none}h1{font-size:2.55rem}.sub{font-size:.96rem}.card{border-radius:20px}.card-head{padding:21px 18px 16px}.content,.launch{padding-left:18px;padding-right:18px}.input-row{grid-template-columns:1fr}.input-row .btn{width:100%}.dest{grid-template-columns:38px minmax(0,1fr);padding:10px}.platform{width:38px;height:38px}.connect{grid-column:2;width:100%}.settings{grid-template-columns:1fr}.preview{margin-left:18px;margin-right:18px;aspect-ratio:9/12}.activity{padding:18px}.fuel-panel{padding:20px 18px}.fuel-top{align-items:stretch;flex-direction:column}.fuel-top .btn{width:100%}.fuel-packages{grid-template-columns:1fr}.connections-card{padding:20px 18px}.connections-top{align-items:stretch;flex-direction:column}.connections-top .btn{width:100%}.connection-row{grid-template-columns:42px 1fr}.connection-actions{grid-column:1/-1}.tiny{flex:1}.toast{left:14px;right:14px;text-align:center}}
+    @media(max-width:900px){.grid{grid-template-columns:1fr}.start-card{position:static}.preview{aspect-ratio:16/10}.topline{grid-template-columns:1fr}.mini-stats{display:none}.engine-form{grid-template-columns:1fr 1fr}.clip-results{grid-template-columns:1fr 1fr}}
+    @media(max-width:620px){.shell{padding:20px 14px 55px}header{margin-bottom:28px}.brand strong{font-size:1rem}.header-right{gap:5px}.fuel-badge{padding:8px 10px}.status{padding:8px 11px}.status .status-copy{display:none}h1{font-size:2.55rem}.sub{font-size:.96rem}.card{border-radius:20px}.card-head{padding:21px 18px 16px}.content,.launch{padding-left:18px;padding-right:18px}.input-row{grid-template-columns:1fr}.input-row .btn{width:100%}.dest{grid-template-columns:38px minmax(0,1fr);padding:10px}.platform{width:38px;height:38px}.connect{grid-column:2;width:100%}.settings{grid-template-columns:1fr}.preview{margin-left:18px;margin-right:18px;aspect-ratio:9/12}.activity{padding:18px}.fuel-panel{padding:20px 18px}.fuel-top{align-items:stretch;flex-direction:column}.fuel-top .btn{width:100%}.fuel-packages{grid-template-columns:1fr}.connections-card{padding:20px 18px}.connections-top{align-items:stretch;flex-direction:column}.connections-top .btn{width:100%}.connection-row{grid-template-columns:42px 1fr}.connection-actions{grid-column:1/-1}.tiny{flex:1}.toast{left:14px;right:14px;text-align:center}.engine-card{padding:18px}.engine-form{grid-template-columns:1fr}.clip-results{grid-template-columns:1fr}}
   </style>
 </head>
 <body>
@@ -82,8 +83,25 @@
     </header>
 
     <section class="topline">
-      <div><p class="eyebrow">Automatic clipping control</p><h1>One stream. Every winning moment.</h1><p class="sub">Paste the streamer link, connect where the clips should go, and let ClipMagic watch, cut, brand and publish around the clock.</p></div>
+      <div><p class="eyebrow">Working video clipping engine</p><h1>One stream. Every winning moment.</h1><p class="sub">Upload a video now and the server will create real vertical, branded clips that you can play and download.</p></div>
       <div class="mini-stats"><div class="mini"><b id="clipCount">0</b><small>Clips today</small></div><div class="mini"><b id="postCount">0</b><small>Posted</small></div></div>
+    </section>
+
+    <section class="card engine-card">
+      <p class="eyebrow">Real processing test</p>
+      <h2>Upload one of your videos and make clips</h2>
+      <p class="engine-copy">The server uses FFmpeg to cut the uploaded video, resize each clip vertically, add your page name and FOLLOW label, and automatically remove temporary files after one hour.</p>
+      <form id="engineForm" class="engine-form">
+        <div class="wide"><label for="realVideo">Your video file</label><input id="realVideo" name="video" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska" required></div>
+        <div><label for="realStreamer">Streamer name</label><input id="realStreamer" name="streamer_name" value="Carter Efe" required></div>
+        <div><label for="realPage">Your page name</label><input id="realPage" name="page_name" value="BobbyBets Clips" required></div>
+        <div><label for="realCount">Number of clips</label><select id="realCount" name="clip_count"><option value="1">1 clip</option><option value="3" selected>3 clips</option><option value="5">5 clips</option></select></div>
+        <div><label for="realLength">Seconds per clip</label><select id="realLength" name="clip_length"><option value="15">15 seconds</option><option value="30" selected>30 seconds</option><option value="45">45 seconds</option><option value="60">60 seconds</option></select></div>
+        <button class="btn submit" id="processBtn" type="submit">Create real clips</button>
+      </form>
+      <div class="engine-state" id="engineState"><strong>Engine ready</strong><span>Select a video to begin.</span><div class="progress"><span id="engineProgress"></span></div></div>
+      <div class="clip-results" id="clipResults"></div>
+      <p class="truth-note">Social publishing is locked until Facebook, Instagram, YouTube or TikTok grants official account authorization. A pasted profile link alone cannot legally sign in or post.</p>
     </section>
 
     <section class="card fuel-panel" id="fuelPanel">
@@ -164,12 +182,36 @@
         </section>
       </aside>
     </div>
-    <p class="demo-note">Interactive visual demo — account connections and publishing are simulated.</p>
+    <p class="demo-note">Video upload, cutting, branding, downloads and temporary cleanup are real. Social account connection and 24/7 source monitoring require official platform authorization.</p>
   </main>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
   <script>
     const toast=document.getElementById('toast');
     function say(message){toast.textContent=message;toast.classList.add('show');clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>toast.classList.remove('show'),2400)}
+    const engineForm=document.getElementById('engineForm');
+    const engineState=document.getElementById('engineState');
+    const engineProgress=document.getElementById('engineProgress');
+    const clipResults=document.getElementById('clipResults');
+    let enginePoll=null;
+    function showEngine(title,message,progress){engineState.querySelector('strong').textContent=title;engineState.querySelector('span').textContent=message;engineProgress.style.width=String(progress||0)+'%'}
+    async function pollJob(jobId){
+      clearTimeout(enginePoll);
+      try{
+        const response=await fetch('/api/jobs/'+jobId);const job=await response.json();if(!response.ok)throw new Error(job.detail||'Job unavailable');
+        showEngine(job.status==='completed'?'Clips ready':job.status==='failed'?'Processing failed':'Working on your video',job.message,job.progress);
+        if(job.status==='completed'){
+          document.getElementById('clipCount').textContent=String(job.outputs.length);
+          clipResults.innerHTML=job.outputs.map(item=>'<article class="clip-result"><video controls preload="metadata" src="'+item.url+'"></video><b>'+item.title+'</b><a href="'+item.url+'" download>Download clip</a></article>').join('');
+          document.getElementById('processBtn').disabled=false;document.getElementById('processBtn').textContent='Create real clips';return;
+        }
+        if(job.status==='failed'){document.getElementById('processBtn').disabled=false;document.getElementById('processBtn').textContent='Try another video';return}
+        enginePoll=setTimeout(()=>pollJob(jobId),1500);
+      }catch(error){showEngine('Could not read job',error.message,100);document.getElementById('processBtn').disabled=false}
+    }
+    engineForm.addEventListener('submit',async event=>{
+      event.preventDefault();const button=document.getElementById('processBtn');button.disabled=true;button.textContent='Uploading video…';clipResults.innerHTML='';showEngine('Uploading','Keep this page open while the video uploads.',2);
+      try{const response=await fetch('/api/jobs',{method:'POST',body:new FormData(engineForm)});const job=await response.json();if(!response.ok)throw new Error(job.detail||'Upload failed');button.textContent='Processing video…';pollJob(job.id)}catch(error){showEngine('Upload failed',error.message,100);button.disabled=false;button.textContent='Try again'}
+    });
     const defaultBilling={enabled:true,balance:7200,packages:[{name:'Starter',fuel:5000,price:5000},{name:'Creator',fuel:12000,price:10000},{name:'Pro',fuel:30000,price:20000}],payments:{card:true,transfer:true,cash:true},bank:{bank:'Demo Bank',account:'0123456789',name:'ClipMagic Media'}};
     function getBilling(){try{return {...defaultBilling,...JSON.parse(localStorage.getItem('clipmagicBilling')||'{}')}}catch{return defaultBilling}}
     function money(value){return '₦'+Number(value).toLocaleString()}
@@ -197,8 +239,8 @@
     importHistory.addEventListener('change',()=>{document.getElementById('historyOptions').hidden=!importHistory.checked;document.getElementById('historyStatus').textContent=importHistory.checked?'Old-video importing is ready.':'Old videos are off. New-video monitoring is unchanged.';say(importHistory.checked?'Old-video import turned on':'Old-video import turned off')});
     document.getElementById('importRecent').addEventListener('click',()=>{document.getElementById('historyStatus').textContent='Latest 20 old videos selected for clipping.';say('Latest 20 old videos selected')});
     document.getElementById('importAll').addEventListener('click',()=>{document.getElementById('historyStatus').textContent='All visible old videos selected for clipping.';say('All visible old videos selected')});
-    document.getElementById('watchBtn').addEventListener('click',()=>{if(!sourceInput.value.trim()){say('Paste the streamer link first');sourceInput.focus();return}updateName();document.getElementById('sourcePreview').hidden=false;document.getElementById('sourceText').textContent=sourceInput.value.trim();say((nameInput.value.trim()||'Streamer')+' added — the name will appear in every post')});
-    document.querySelectorAll('.connect').forEach(btn=>btn.addEventListener('click',()=>{const input=btn.parentElement.querySelector('input');if(!input.value.trim()){say('Paste this account link first');input.focus();return}const connected=btn.classList.toggle('connected');btn.classList.toggle('secondary',!connected);btn.textContent=connected?'Connected ✓':'Connect';say(connected?'Account connected':'Account disconnected')}));
+    document.getElementById('watchBtn').addEventListener('click',()=>{if(!sourceInput.value.trim()){say('Paste the streamer link first');sourceInput.focus();return}updateName();document.getElementById('sourcePreview').hidden=false;document.getElementById('sourceText').textContent=sourceInput.value.trim();document.querySelector('#sourcePreview .watch').textContent='● Authorization required';say('Source saved — official platform authorization is still required')});
+    document.querySelectorAll('.connect').forEach(btn=>btn.addEventListener('click',()=>{const input=btn.parentElement.querySelector('input');if(!input.value.trim()){say('Paste this account link first');input.focus();return}say('This platform must authorize ClipMagic before posting can start');btn.textContent='Authorization needed';btn.classList.remove('connected')}));
     function renderConnections(){
       const list=document.getElementById('connectionsList');
       const active=connections.filter(item=>item.active).length;
@@ -224,18 +266,7 @@
       startBtn.textContent='Start clipping 24/7';startBtn.classList.remove('stop');document.getElementById('launchNote').textContent='Waiting for your connections';updateName();updateAccountName();sourceInput.focus();
     }
     document.getElementById('newConnectionBtn').addEventListener('click',()=>{if(connections.length>=7){say('You already have 7 clipping connections');return}resetWorkspace();document.querySelector('.grid').scrollIntoView({behavior:'smooth'});say('Fresh connection ready — your other clippers keep running')});
-    startBtn.addEventListener('click',()=>{
-      const hasSource=!document.getElementById('sourcePreview').hidden;
-      const connected=document.querySelectorAll('.connect.connected').length;
-      if(!hasSource||!connected){say(!hasSource?'Add the streamer source first':'Connect at least one destination');return}
-      if(!monitorNew.checked&&!importHistory.checked){say('Turn on new-video monitoring or old-video importing');return}
-      const name=nameInput.value.trim()||'New streamer';
-      const accountName=accountNameInput.value.trim();if(!accountName){say('Enter the page or account name for the Follow button');accountNameInput.focus();return}
-      const sound=soundFile.files[0]?'Your sound: '+soundFile.files[0].name:soundChoice.value;
-      if(editingId){const item=connections.find(entry=>entry.id===editingId);item.name=name;item.accountName=accountName;item.source=sourceInput.value.trim();item.platforms=connected;item.sound=sound;item.monitorNew=monitorNew.checked;item.importHistory=importHistory.checked;item.active=true;say(name+' connection updated')}
-      else{if(connections.length>=7){say('Maximum of 7 connections reached');return}connections.push({id:String(Date.now()),name,accountName,source:sourceInput.value.trim(),platforms:connected,sound,monitorNew:monitorNew.checked,importHistory:importHistory.checked,active:true});say(name+' is now clipping and posting automatically')}
-      startBtn.textContent='Connection running ✓';document.getElementById('launchNote').textContent='Watching, clipping and posting automatically';renderConnections();document.querySelector('.connections-card').scrollIntoView({behavior:'smooth'});
-    });
+    startBtn.addEventListener('click',()=>{say('Authorize at least one source and destination platform first');document.getElementById('launchNote').textContent='Official platform authorization is required';});
     document.getElementById('connectionsList').addEventListener('click',event=>{
       const row=event.target.closest('.connection-row');if(!row)return;const item=connections.find(entry=>entry.id===row.dataset.id);if(!item)return;
       if(event.target.classList.contains('pause')){item.active=!item.active;renderConnections();say(item.name+(item.active?' resumed':' paused'))}

@@ -18,3 +18,5 @@ services:
         value: "3600"
       - key: CLIPMAGIC_MAX_UPLOAD_MB
         value: "250"
+      - key: CLIPMAGIC_OWNER_EMAIL
+        value: Ebubedikellc@gmail.com

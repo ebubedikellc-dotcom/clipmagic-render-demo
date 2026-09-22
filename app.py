@@ -1,6 +1,9 @@
 from __future__ import annotations
 
 import asyncio
+import base64
+import hashlib
+import hmac
 import json
 import os
 import re
@@ -11,8 +14,8 @@ import time
 import uuid
 from pathlib import Path
 
-from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, UploadFile
-from fastapi.responses import FileResponse, JSONResponse
+from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
 
 
@@ -21,12 +24,41 @@ WORK_ROOT = Path(os.environ.get("CLIPMAGIC_WORK_ROOT", "/tmp/clipmagic-jobs"))
 MAX_UPLOAD_BYTES = int(os.environ.get("CLIPMAGIC_MAX_UPLOAD_MB", "250")) * 1024 * 1024
 JOB_TTL_SECONDS = int(os.environ.get("CLIPMAGIC_JOB_TTL_SECONDS", "3600"))
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
+OWNER_EMAIL = os.environ.get("CLIPMAGIC_OWNER_EMAIL", "Ebubedikellc@gmail.com").strip().lower()
+OWNER_PASSWORD = os.environ.get("CLIPMAGIC_OWNER_PASSWORD", "")
+SESSION_SECRET = os.environ.get("CLIPMAGIC_SESSION_SECRET") or hashlib.sha256(
+    f"clipmagic-session|{OWNER_PASSWORD}".encode()
+).hexdigest()
+SESSION_COOKIE = "clipmagic_owner_session"
 
 WORK_ROOT.mkdir(parents=True, exist_ok=True)
 
 app = FastAPI(title="ClipMagic Engine", version="1.0.0")
 jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
+
+
+def create_owner_session() -> str:
+    expires = str(int(time.time()) + 60 * 60 * 24 * 7)
+    payload = f"{OWNER_EMAIL}|{expires}"
+    signature = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{payload}|{signature}".encode()).decode()
+
+
+def valid_owner_session(request: Request) -> bool:
+    token = request.cookies.get(SESSION_COOKIE, "")
+    try:
+        decoded = base64.urlsafe_b64decode(token.encode()).decode()
+        email, expires, signature = decoded.rsplit("|", 2)
+        payload = f"{email}|{expires}"
+        expected = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        return (
+            email == OWNER_EMAIL
+            and int(expires) > int(time.time())
+            and hmac.compare_digest(signature, expected)
+        )
+    except (ValueError, TypeError, base64.binascii.Error):
+        return False
 
 
 def safe_text(value: str, fallback: str) -> str:
@@ -145,6 +177,55 @@ async def startup() -> None:
 @app.get("/health")
 async def health() -> dict:
     return {"status": "ok", "engine": "ffmpeg", "temporary_storage": True}
+
+
+def login_page(message: str = "") -> HTMLResponse:
+    template = (BASE_DIR / "owner-login.html").read_text(encoding="utf-8")
+    message_html = f'<div class="error">{message}</div>' if message else ""
+    return HTMLResponse(template.replace("{{MESSAGE}}", message_html))
+
+
+@app.get("/owner-login")
+async def owner_login_page(request: Request):
+    if valid_owner_session(request):
+        return RedirectResponse("/control-panel.html", status_code=303)
+    configured = bool(OWNER_PASSWORD)
+    return login_page("Owner password is not configured yet." if not configured else "")
+
+
+@app.post("/owner-login")
+async def owner_login(email: str = Form(...), password: str = Form(...)):
+    configured = bool(OWNER_PASSWORD)
+    if not configured:
+        return login_page("Owner password is not configured yet.")
+    email_ok = hmac.compare_digest(email.strip().lower(), OWNER_EMAIL)
+    password_ok = hmac.compare_digest(password, OWNER_PASSWORD)
+    if not (email_ok and password_ok):
+        return login_page("The email or password is incorrect.")
+    response = RedirectResponse("/control-panel.html", status_code=303)
+    response.set_cookie(
+        SESSION_COOKIE,
+        create_owner_session(),
+        max_age=60 * 60 * 24 * 7,
+        httponly=True,
+        secure=True,
+        samesite="strict",
+    )
+    return response
+
+
+@app.post("/owner-logout")
+async def owner_logout():
+    response = RedirectResponse("/owner-login", status_code=303)
+    response.delete_cookie(SESSION_COOKIE)
+    return response
+
+
+@app.get("/control-panel.html")
+async def owner_control_panel(request: Request):
+    if not valid_owner_session(request):
+        return RedirectResponse("/owner-login", status_code=303)
+    return FileResponse(BASE_DIR / "control-panel.html")
 
 
 @app.post("/api/jobs")

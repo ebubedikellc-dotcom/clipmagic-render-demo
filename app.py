@@ -214,21 +214,40 @@ def process_job(job_id: str, input_path: Path, page_name: str, streamer_name: st
                 starts = [usable * (index + 1) / (clip_count + 1) for index in range(clip_count)]
 
             outputs = []
+            post_title_templates = [
+                f"{streamer_name} could not believe this moment",
+                f"{streamer_name}'s reaction says everything",
+                f"Wait for {streamer_name}'s unexpected ending",
+                f"{streamer_name} delivered an unforgettable moment",
+                f"This {streamer_name} highlight deserves a replay",
+            ]
+            streamer_tag = re.sub(r"[^A-Za-z0-9]", "", streamer_name)[:32] or "Highlights"
+            page_tag = re.sub(r"[^A-Za-z0-9]", "", page_name)[:32] or "Clips"
             for index, start in enumerate(starts, 1):
                 output_name = f"clip-{index}.mp4"
                 output_path = job_dir / output_name
-                title = safe_text(f"{streamer_name} highlight {index}", "New highlight")
-                brand = safe_text(f"{page_name}   FOLLOW", "FOLLOW")
+                title = safe_text(f"{streamer_name} HIGHLIGHT", "NEW HIGHLIGHT")
+                brand = safe_text(page_name, "My Clips Page")
+                avatar = safe_text((page_name.strip()[:1] or "M").upper(), "M")
                 vf = (
                     "scale=540:960:force_original_aspect_ratio=decrease,"
                     "pad=540:960:(ow-iw)/2:(oh-ih)/2:color=black,"
+                    "drawbox=x=22:y=26:w=496:h=62:color=0x071321@0.84:t=fill,"
+                    "drawbox=x=22:y=26:w=6:h=62:color=0x2cb4f3@1:t=fill,"
                     f"drawtext=fontfile={FONT_PATH}:text='{title}':"
-                    "fontcolor=white:fontsize=27:borderw=3:bordercolor=black:"
-                    "x=(w-text_w)/2:y=48,"
+                    "fontcolor=white:fontsize=25:borderw=1:bordercolor=0x071321:"
+                    "x=44:y=44,"
+                    "drawbox=x=22:y=ih-122:w=496:h=94:color=0x071321@0.92:t=fill,"
+                    "drawbox=x=36:y=ih-104:w=58:h=58:color=0x2cb4f3@1:t=fill,"
+                    f"drawtext=fontfile={FONT_PATH}:text='{avatar}':"
+                    "fontcolor=0x071321:fontsize=28:x=55:y=h-98,"
                     f"drawtext=fontfile={FONT_PATH}:text='{brand}':"
-                    "fontcolor=white:fontsize=24:borderw=3:bordercolor=black:"
-                    "box=1:boxcolor=0x0b1626cc:boxborderw=14:"
-                    "x=(w-text_w)/2:y=h-text_h-60"
+                    "fontcolor=white:fontsize=22:x=108:y=h-101,"
+                    "drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:"
+                    "text='Fresh clips and highlights':fontcolor=0x9fb2ca:fontsize=14:x=108:y=h-70,"
+                    "drawbox=x=iw-169:y=ih-104:w=133:h=58:color=0x2cb4f3@1:t=fill,"
+                    f"drawtext=fontfile={FONT_PATH}:text='FOLLOW  >':"
+                    "fontcolor=0x06121f:fontsize=19:x=w-153:y=h-86"
                 )
                 run([
                     "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
@@ -241,6 +260,8 @@ def process_job(job_id: str, input_path: Path, page_name: str, streamer_name: st
                 outputs.append({
                     "name": output_name,
                     "title": f"{streamer_name} highlight {index}",
+                    "post_title": post_title_templates[index - 1],
+                    "hashtags": f"#{streamer_tag} #{page_tag} #Highlights #TrendingClips",
                     "seconds": actual_length,
                     "url": f"/api/jobs/{job_id}/files/{output_name}",
                 })

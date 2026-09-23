@@ -226,17 +226,11 @@ def process_job(job_id: str, input_path: Path, page_name: str, streamer_name: st
             for index, start in enumerate(starts, 1):
                 output_name = f"clip-{index}.mp4"
                 output_path = job_dir / output_name
-                title = safe_text(f"{streamer_name} HIGHLIGHT", "NEW HIGHLIGHT")
                 brand = safe_text(page_name, "My Clips Page")
                 avatar = safe_text((page_name.strip()[:1] or "M").upper(), "M")
                 vf = (
                     "scale=540:960:force_original_aspect_ratio=decrease,"
                     "pad=540:960:(ow-iw)/2:(oh-ih)/2:color=black,"
-                    "drawbox=x=22:y=26:w=496:h=62:color=0x071321@0.84:t=fill,"
-                    "drawbox=x=22:y=26:w=6:h=62:color=0x2cb4f3@1:t=fill,"
-                    f"drawtext=fontfile={FONT_PATH}:text='{title}':"
-                    "fontcolor=white:fontsize=25:borderw=1:bordercolor=0x071321:"
-                    "x=44:y=44,"
                     "drawbox=x=22:y=ih-122:w=496:h=94:color=0x071321@0.92:t=fill,"
                     "drawbox=x=36:y=ih-104:w=58:h=58:color=0x2cb4f3@1:t=fill,"
                     f"drawtext=fontfile={FONT_PATH}:text='{avatar}':"

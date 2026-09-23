@@ -212,7 +212,7 @@
         if(job.status==='completed'){
           document.getElementById('clipCount').textContent=String(job.outputs.length);
           reviewEmpty.hidden=true;reviewCount.textContent=job.outputs.length+' ready';
-          clipResults.innerHTML=job.outputs.map(item=>'<article class="clip-result"><video controls playsinline preload="metadata" src="'+item.url+'"></video><b>'+item.title+'</b><span class="clip-meta">'+item.seconds+' seconds · Ready to review</span><div class="post-suggestion"><small>Suggested social-media post name</small><strong>'+item.post_title+'</strong><span class="post-tags">'+item.hashtags+'</span></div><a href="'+item.url+'" download>⬇ Download to phone</a></article>').join('');
+          clipResults.innerHTML=job.outputs.map(item=>'<article class="clip-result"><video controls playsinline preload="metadata" src="'+item.url+'"></video><span class="clip-meta">'+item.seconds+' seconds · Ready to review</span><div class="post-suggestion"><small>Title to use when posting</small><strong>'+item.post_title+'</strong><span class="post-tags">'+item.hashtags+'</span></div><a href="'+item.url+'" download>⬇ Download to phone</a></article>').join('');
           deleteClips.hidden=false;
           document.getElementById('reviewArea').scrollIntoView({behavior:'smooth',block:'start'});
           document.getElementById('processBtn').disabled=false;document.getElementById('processBtn').textContent='Create real clips';return;

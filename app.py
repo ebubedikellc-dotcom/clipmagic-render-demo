@@ -42,6 +42,36 @@ WORK_ROOT.mkdir(parents=True, exist_ok=True)
 app = FastAPI(title="ClipMagic Engine", version="1.0.0")
 jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
+processing_slot = threading.Semaphore(max(1, int(os.environ.get("CLIPMAGIC_MAX_ACTIVE_JOBS", "1"))))
+
+
+def job_state_path(job_id: str) -> Path:
+    return WORK_ROOT / job_id / "job.json"
+
+
+def save_job_state(job_id: str) -> None:
+    job = jobs.get(job_id)
+    if not job:
+        return
+    path = job_state_path(job_id)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(job), encoding="utf-8")
+    temporary.replace(path)
+
+
+def load_job_state(job_id: str) -> dict | None:
+    path = job_state_path(job_id)
+    if not path.is_file():
+        return None
+    try:
+        job = json.loads(path.read_text(encoding="utf-8"))
+        if job.get("id") != job_id:
+            return None
+        jobs[job_id] = job
+        return job
+    except (OSError, ValueError, TypeError):
+        return None
 
 
 def database() -> sqlite3.Connection:
@@ -164,66 +194,71 @@ def update_job(job_id: str, **changes) -> None:
     with jobs_lock:
         if job_id in jobs:
             jobs[job_id].update(changes)
+            save_job_state(job_id)
 
 
 def process_job(job_id: str, input_path: Path, page_name: str, streamer_name: str,
                 clip_count: int, clip_length: int) -> None:
     job_dir = input_path.parent
     try:
-        update_job(job_id, status="processing", progress=5, message="Reading the video")
-        duration = probe_duration(input_path)
-        actual_length = max(3, min(clip_length, int(duration)))
-        usable = max(0.0, duration - actual_length)
+        update_job(job_id, status="queued", progress=2, message="Waiting for the video processor")
+        with processing_slot:
+            update_job(job_id, status="processing", progress=5, message="Reading the video")
+            duration = probe_duration(input_path)
+            actual_length = max(3, min(clip_length, int(duration)))
+            usable = max(0.0, duration - actual_length)
 
-        if clip_count == 1 or usable <= 0:
-            starts = [0.0]
-        else:
-            starts = [usable * (index + 1) / (clip_count + 1) for index in range(clip_count)]
+            if clip_count == 1 or usable <= 0:
+                starts = [0.0]
+            else:
+                starts = [usable * (index + 1) / (clip_count + 1) for index in range(clip_count)]
 
-        outputs = []
-        for index, start in enumerate(starts, 1):
-            output_name = f"clip-{index}.mp4"
-            output_path = job_dir / output_name
-            title = safe_text(f"{streamer_name} highlight {index}", "New highlight")
-            brand = safe_text(f"{page_name}   FOLLOW", "FOLLOW")
-            vf = (
-                "scale=720:1280:force_original_aspect_ratio=decrease,"
-                "pad=720:1280:(ow-iw)/2:(oh-ih)/2:color=black,"
-                f"drawtext=fontfile={FONT_PATH}:text='{title}':"
-                "fontcolor=white:fontsize=34:borderw=3:bordercolor=black:"
-                "x=(w-text_w)/2:y=60,"
-                f"drawtext=fontfile={FONT_PATH}:text='{brand}':"
-                "fontcolor=white:fontsize=30:borderw=3:bordercolor=black:"
-                "box=1:boxcolor=0x0b1626cc:boxborderw=18:"
-                "x=(w-text_w)/2:y=h-text_h-80"
-            )
-            run([
-                "ffmpeg", "-hide_banner", "-loglevel", "error", "-y",
-                "-ss", f"{start:.3f}", "-i", str(input_path), "-t", str(actual_length),
-                "-vf", vf, "-c:v", "libx264", "-preset", "veryfast", "-crf", "25",
-                "-c:a", "aac", "-b:a", "128k", "-movflags", "+faststart", str(output_path),
-            ])
-            outputs.append({
-                "name": output_name,
-                "title": f"{streamer_name} highlight {index}",
-                "seconds": actual_length,
-                "url": f"/api/jobs/{job_id}/files/{output_name}",
-            })
+            outputs = []
+            for index, start in enumerate(starts, 1):
+                output_name = f"clip-{index}.mp4"
+                output_path = job_dir / output_name
+                title = safe_text(f"{streamer_name} highlight {index}", "New highlight")
+                brand = safe_text(f"{page_name}   FOLLOW", "FOLLOW")
+                vf = (
+                    "scale=540:960:force_original_aspect_ratio=decrease,"
+                    "pad=540:960:(ow-iw)/2:(oh-ih)/2:color=black,"
+                    f"drawtext=fontfile={FONT_PATH}:text='{title}':"
+                    "fontcolor=white:fontsize=27:borderw=3:bordercolor=black:"
+                    "x=(w-text_w)/2:y=48,"
+                    f"drawtext=fontfile={FONT_PATH}:text='{brand}':"
+                    "fontcolor=white:fontsize=24:borderw=3:bordercolor=black:"
+                    "box=1:boxcolor=0x0b1626cc:boxborderw=14:"
+                    "x=(w-text_w)/2:y=h-text_h-60"
+                )
+                run([
+                    "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin", "-y",
+                    "-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1",
+                    "-ss", f"{start:.3f}", "-i", str(input_path), "-t", str(actual_length),
+                    "-vf", vf, "-c:v", "libx264", "-threads", "1", "-preset", "ultrafast",
+                    "-tune", "zerolatency", "-crf", "26", "-c:a", "aac", "-b:a", "96k",
+                    "-movflags", "+faststart", str(output_path),
+                ])
+                outputs.append({
+                    "name": output_name,
+                    "title": f"{streamer_name} highlight {index}",
+                    "seconds": actual_length,
+                    "url": f"/api/jobs/{job_id}/files/{output_name}",
+                })
+                update_job(
+                    job_id,
+                    progress=5 + int(90 * index / len(starts)),
+                    message=f"Created clip {index} of {len(starts)}",
+                )
+
+            input_path.unlink(missing_ok=True)
             update_job(
                 job_id,
-                progress=5 + int(90 * index / len(starts)),
-                message=f"Created clip {index} of {len(starts)}",
+                status="completed",
+                progress=100,
+                message=f"{len(outputs)} real clips are ready",
+                outputs=outputs,
+                expires_at=int(time.time() + JOB_TTL_SECONDS),
             )
-
-        input_path.unlink(missing_ok=True)
-        update_job(
-            job_id,
-            status="completed",
-            progress=100,
-            message=f"{len(outputs)} real clips are ready",
-            outputs=outputs,
-            expires_at=int(time.time() + JOB_TTL_SECONDS),
-        )
     except Exception as exc:
         input_path.unlink(missing_ok=True)
         update_job(job_id, status="failed", progress=100, message=str(exc)[:300])
@@ -247,6 +282,8 @@ def cleanup_expired() -> None:
 @app.on_event("startup")
 async def startup() -> None:
     initialize_database()
+    for path in WORK_ROOT.glob("*/job.json"):
+        load_job_state(path.parent.name)
     threading.Thread(target=cleanup_expired, daemon=True).start()
 
 
@@ -474,6 +511,7 @@ async def create_job(
         "created_at": int(time.time()),
         "expires_at": int(time.time() + JOB_TTL_SECONDS),
     }
+    save_job_state(job_id)
     background_tasks.add_task(
         process_job, job_id, input_path, page_name, streamer_name, clip_count, clip_length
     )
@@ -482,7 +520,7 @@ async def create_job(
 
 @app.get("/api/jobs/{job_id}")
 async def get_job(job_id: str) -> dict:
-    job = jobs.get(job_id)
+    job = jobs.get(job_id) or load_job_state(job_id)
     if not job:
         raise HTTPException(404, "Job not found or its temporary files have been deleted")
     return job

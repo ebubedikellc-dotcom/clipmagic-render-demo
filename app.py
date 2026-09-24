@@ -19,6 +19,8 @@ from urllib.parse import urlencode, urlparse
 
 import httpx
 from cryptography.fernet import Fernet
+from cryptography.hazmat.primitives import padding
+from cryptography.hazmat.primitives.ciphers import Cipher, algorithms, modes
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.staticfiles import StaticFiles
@@ -177,12 +179,18 @@ def initialize_database() -> None:
             )
 
 
-SUPPORTED_DESTINATIONS = {"facebook", "instagram", "youtube", "tiktok"}
+SUPPORTED_DESTINATIONS = {"facebook", "instagram", "youtube", "tiktok", "x", "snapchat", "dailymotion"}
+OAUTH_DESTINATIONS = {"facebook", "instagram", "youtube", "tiktok", "x", "snapchat"}
 
 
 def oauth_environment(platform: str) -> tuple[str, str]:
     """Return the developer-app client credentials configured by the site owner."""
-    prefix = {"facebook": "META", "instagram": "META", "youtube": "GOOGLE", "tiktok": "TIKTOK"}[platform]
+    prefix = {
+        "facebook": "META", "instagram": "META", "youtube": "GOOGLE", "tiktok": "TIKTOK",
+        "x": "X", "snapchat": "SNAPCHAT",
+    }.get(platform)
+    if not prefix:
+        return "", ""
     client_id = os.environ.get(f"{prefix}_CLIENT_ID", "").strip()
     client_secret = os.environ.get(f"{prefix}_CLIENT_SECRET", "").strip()
     if client_id and client_secret:
@@ -232,6 +240,12 @@ def parse_oauth_state(state: str, expected_platform: str) -> int:
         return int(user_id)
     except Exception as exc:
         raise HTTPException(400, "This connection request expired. Please press Connect again.") from exc
+
+
+def x_pkce_verifier(state: str) -> str:
+    """Create a reproducible PKCE verifier without storing temporary browser state."""
+    digest = hmac.new(SESSION_SECRET.encode(), f"x-pkce|{state}".encode(), hashlib.sha256).digest()
+    return base64.urlsafe_b64encode(digest).decode().rstrip("=")
 
 
 def save_credentials(user_id: int, platform: str, values: dict) -> None:
@@ -301,6 +315,25 @@ def active_credentials(user_id: int, platform: str) -> dict:
     """Refresh expiring OAuth tokens before an automatic post."""
     credentials = credentials_for(user_id, platform)
     expires_at = int(credentials.get("expires_at") or 0)
+    if platform == "dailymotion":
+        if credentials.get("access_token") and expires_at > int(time.time()) + 300:
+            return credentials
+        if not credentials.get("client_id") or not credentials.get("client_secret"):
+            return credentials
+        try:
+            response = httpx.post(
+                "https://oauth2.dailymotion.com/v2/token",
+                data={"grant_type": "client_credentials", "client_id": credentials["client_id"],
+                      "client_secret": credentials["client_secret"], "scope": "video.manage"}, timeout=30,
+            )
+            response.raise_for_status()
+            refreshed = response.json()
+            credentials["access_token"] = refreshed["access_token"]
+            credentials["expires_at"] = int(time.time()) + int(refreshed.get("expires_in", 3600))
+            save_credentials(user_id, platform, credentials)
+        except Exception:
+            pass
+        return credentials
     if not credentials.get("refresh_token") or expires_at > int(time.time()) + 300:
         return credentials
     client_id, client_secret = oauth_environment(platform)
@@ -319,6 +352,18 @@ def active_credentials(user_id: int, platform: str) -> dict:
                 data={"client_key": client_id, "client_secret": client_secret,
                       "refresh_token": credentials["refresh_token"], "grant_type": "refresh_token"},
                 headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30,
+            )
+        elif platform == "x":
+            response = httpx.post(
+                "https://api.x.com/2/oauth2/token",
+                data={"client_id": client_id, "client_secret": client_secret,
+                      "refresh_token": credentials["refresh_token"], "grant_type": "refresh_token"}, timeout=30,
+            )
+        elif platform == "snapchat":
+            response = httpx.post(
+                "https://accounts.snapchat.com/login/oauth2/access_token",
+                data={"client_id": client_id, "client_secret": client_secret,
+                      "refresh_token": credentials["refresh_token"], "grant_type": "refresh_token"}, timeout=30,
             )
         else:
             return credentials
@@ -777,6 +822,121 @@ def publish_tiktok(path: Path, title: str, hashtags: str, credentials: dict) -> 
     return str(publish_id)
 
 
+def publish_x(path: Path, title: str, hashtags: str, credentials: dict) -> str:
+    token = credentials.get("access_token")
+    if not token:
+        raise RuntimeError("Connect X before automatic posting")
+    headers = {"Authorization": f"Bearer {token}"}
+    size = path.stat().st_size
+    initialize = httpx.post(
+        "https://api.x.com/2/media/upload/initialize", headers=headers,
+        json={"total_bytes": size, "media_type": "video/mp4", "media_category": "tweet_video"}, timeout=60,
+    )
+    initialize.raise_for_status()
+    media_id = str((initialize.json().get("data") or initialize.json()).get("id") or
+                   (initialize.json().get("data") or initialize.json()).get("media_id"))
+    if not media_id or media_id == "None":
+        raise RuntimeError("X did not create a video upload")
+    with path.open("rb") as video:
+        segment = 0
+        while True:
+            chunk = video.read(5 * 1024 * 1024)
+            if not chunk:
+                break
+            add = httpx.post(
+                f"https://api.x.com/2/media/upload/{media_id}/append", headers=headers,
+                data={"segment_index": segment}, files={"media": (path.name, chunk, "video/mp4")}, timeout=120,
+            )
+            add.raise_for_status()
+            segment += 1
+    finalize = httpx.post(f"https://api.x.com/2/media/upload/{media_id}/finalize", headers=headers, timeout=60)
+    finalize.raise_for_status()
+    processing = (finalize.json().get("data") or finalize.json()).get("processing_info") or {}
+    for _ in range(30):
+        if processing.get("state") in {None, "succeeded"}:
+            break
+        if processing.get("state") == "failed":
+            raise RuntimeError("X could not process the uploaded video")
+        time.sleep(max(1, int(processing.get("check_after_secs", 2))))
+        status = httpx.get("https://api.x.com/2/media/upload", headers=headers,
+                           params={"command": "STATUS", "media_id": media_id}, timeout=30)
+        status.raise_for_status()
+        processing = (status.json().get("data") or status.json()).get("processing_info") or {}
+    caption = f"{title}\n\n{hashtags}".strip()[:280]
+    post = httpx.post("https://api.x.com/2/tweets", headers={**headers, "Content-Type": "application/json"},
+                      json={"text": caption, "media": {"media_ids": [media_id]}}, timeout=60)
+    post.raise_for_status()
+    return str((post.json().get("data") or {}).get("id") or media_id)
+
+
+def publish_snapchat(path: Path, title: str, hashtags: str, credentials: dict) -> str:
+    token, profile_id = credentials.get("access_token"), credentials.get("profile_id")
+    if not token or not profile_id:
+        raise RuntimeError("Connect an approved Snapchat Public Profile before automatic posting")
+    headers = {"Authorization": f"Bearer {token}"}
+    key, iv = os.urandom(32), os.urandom(16)
+    padder = padding.PKCS7(128).padder()
+    raw = path.read_bytes()
+    padded = padder.update(raw) + padder.finalize()
+    encryptor = Cipher(algorithms.AES(key), modes.CBC(iv)).encryptor()
+    encrypted = encryptor.update(padded) + encryptor.finalize()
+    create = httpx.post(
+        f"https://businessapi.snapchat.com/v1/public_profiles/{profile_id}/media", headers=headers,
+        json={"type": "VIDEO", "name": path.stem[:100], "key": base64.b64encode(key).decode(),
+              "iv": base64.b64encode(iv).decode()}, timeout=60,
+    )
+    create.raise_for_status()
+    media = create.json()
+    media_id, add_path, finalize_path = media.get("media_id"), media.get("add_path"), media.get("finalize_path")
+    if not all((media_id, add_path, finalize_path)):
+        raise RuntimeError("Snapchat did not create a media container")
+    for index, offset in enumerate(range(0, len(encrypted), 32 * 1024 * 1024), start=1):
+        chunk = encrypted[offset:offset + 32 * 1024 * 1024]
+        add = httpx.post(f"https://businessapi.snapchat.com{add_path}", headers=headers,
+                         data={"action": "ADD", "part_number": str(index)},
+                         files={"file": (f"{path.name}.{index}", chunk, "application/octet-stream")}, timeout=180)
+        add.raise_for_status()
+    finish = httpx.post(f"https://businessapi.snapchat.com{finalize_path}", headers=headers,
+                        data={"action": "FINALIZE"}, timeout=60)
+    finish.raise_for_status()
+    description = f"{title} {hashtags}".strip()[:160]
+    post = httpx.post(
+        f"https://businessapi.snapchat.com/v1/public_profiles/{profile_id}/spotlights", headers=headers,
+        json={"media_id": media_id, "skip_save_to_profile": False, "description": description,
+              "locale": credentials.get("locale", "en_US")}, timeout=60,
+    )
+    post.raise_for_status()
+    return str(post.json().get("spotlight_id") or media_id)
+
+
+def publish_dailymotion(path: Path, title: str, hashtags: str, credentials: dict) -> str:
+    token, profile_id = credentials.get("access_token"), credentials.get("profile_id")
+    if not token or not profile_id:
+        raise RuntimeError("Save and verify the Dailymotion profile credentials before automatic posting")
+    headers = {"Authorization": f"Bearer {token}"}
+    session = httpx.post("https://api.dailymotion.com/v2/files/upload_sessions", headers=headers, timeout=60)
+    session.raise_for_status()
+    session_data = session.json()
+    upload_url = session_data.get("upload_url") or (session_data.get("data") or {}).get("upload_url")
+    if not upload_url:
+        raise RuntimeError("Dailymotion did not provide an upload address")
+    with path.open("rb") as video:
+        upload = httpx.post(upload_url, headers=headers, files={"file": (path.name, video, "video/mp4")}, timeout=300)
+    upload.raise_for_status()
+    uploaded = upload.json()
+    file_url = uploaded.get("url") or uploaded.get("file_url") or (uploaded.get("data") or {}).get("url")
+    if not file_url:
+        raise RuntimeError("Dailymotion did not return the uploaded file URL")
+    create = httpx.post(
+        f"https://api.dailymotion.com/v2/profiles/{profile_id}/videos", headers=headers,
+        json={"title": title[:255], "description": hashtags, "category": "people",
+              "visibility": "public", "is_for_kids": False, "source": {"file_url": file_url}}, timeout=60,
+    )
+    create.raise_for_status()
+    result = create.json()
+    return str(result.get("video_id") or result.get("id") or (result.get("data") or {}).get("id") or "uploaded")
+
+
 def publish_one(row: sqlite3.Row) -> str:
     path = WORK_ROOT / row["job_id"] / row["filename"]
     if not path.is_file():
@@ -792,6 +952,12 @@ def publish_one(row: sqlite3.Row) -> str:
         return publish_youtube(path, row["title"], row["hashtags"], credentials)
     if row["platform"] == "tiktok":
         return publish_tiktok(path, row["title"], row["hashtags"], credentials)
+    if row["platform"] == "x":
+        return publish_x(path, row["title"], row["hashtags"], credentials)
+    if row["platform"] == "snapchat":
+        return publish_snapchat(path, row["title"], row["hashtags"], credentials)
+    if row["platform"] == "dailymotion":
+        return publish_dailymotion(path, row["title"], row["hashtags"], credentials)
     raise PermissionError("Automatic posting is not available for this platform yet")
 
 
@@ -910,7 +1076,7 @@ async def owner_platform_apps(request: Request):
     if not valid_owner_session(request):
         raise HTTPException(401, "Owner login required")
     result = {}
-    for platform in ("meta", "youtube", "tiktok"):
+    for platform in ("meta", "youtube", "tiktok", "x", "snapchat"):
         check_platform = "facebook" if platform == "meta" else platform
         client_id, client_secret = oauth_environment(check_platform)
         callbacks = (
@@ -930,7 +1096,7 @@ async def owner_platform_apps(request: Request):
 async def update_owner_platform_app(platform: str, request: Request):
     if not valid_owner_session(request):
         raise HTTPException(401, "Owner login required")
-    if platform not in {"meta", "youtube", "tiktok"}:
+    if platform not in {"meta", "youtube", "tiktok", "x", "snapchat"}:
         raise HTTPException(404, "Platform not supported")
     try:
         body = await request.json()
@@ -1037,7 +1203,7 @@ async def oauth_status(request: Request):
         client_id, client_secret = oauth_environment(platform)
         credentials = credentials_for(customer["id"], platform)
         status[platform] = {
-            "available": bool(client_id and client_secret),
+            "available": bool(client_id and client_secret) if platform in OAUTH_DESTINATIONS else True,
             "connected": bool(credentials.get("access_token") or credentials.get("api_token")),
             "connected_at": credentials.get("connected_at"),
         }
@@ -1051,6 +1217,8 @@ async def oauth_start(platform: str, request: Request):
         return RedirectResponse("/login", status_code=303)
     if platform not in SUPPORTED_DESTINATIONS:
         raise HTTPException(404, "Platform not supported")
+    if platform not in OAUTH_DESTINATIONS:
+        return RedirectResponse(f"/?connection={platform}&result=credentials_required", status_code=303)
     client_id, client_secret = oauth_environment(platform)
     if not client_id or not client_secret:
         return RedirectResponse(f"/?connection={platform}&result=owner_setup_required", status_code=303)
@@ -1077,7 +1245,7 @@ async def oauth_start(platform: str, request: Request):
             "include_granted_scopes": "true",
         }
         url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
-    else:
+    elif platform == "tiktok":
         params = {
             "client_key": client_id,
             "redirect_uri": redirect_uri,
@@ -1086,6 +1254,17 @@ async def oauth_start(platform: str, request: Request):
             "scope": "user.info.basic,video.publish",
         }
         url = f"https://www.tiktok.com/v2/auth/authorize/?{urlencode(params)}"
+    elif platform == "x":
+        verifier = x_pkce_verifier(state)
+        challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
+        params = {"response_type": "code", "client_id": client_id, "redirect_uri": redirect_uri, "scope":
+                  "tweet.read tweet.write users.read media.write offline.access", "state": state,
+                  "code_challenge": challenge, "code_challenge_method": "S256"}
+        url = f"https://x.com/i/oauth2/authorize?{urlencode(params)}"
+    else:
+        params = {"client_id": client_id, "redirect_uri": redirect_uri, "response_type": "code", "state": state,
+                  "scope": "snapchat-profile-api"}
+        url = f"https://accounts.snapchat.com/login/oauth2/authorize?{urlencode(params)}"
     return RedirectResponse(url, status_code=303)
 
 
@@ -1096,6 +1275,8 @@ async def oauth_callback(platform: str, request: Request, state: str = "", code:
     if error or not code:
         return RedirectResponse(f"/?connection={platform}&result=cancelled", status_code=303)
     user_id = parse_oauth_state(state, platform)
+    if platform not in OAUTH_DESTINATIONS:
+        raise HTTPException(400, "This platform uses account-specific credentials instead of Connect")
     client_id, client_secret = oauth_environment(platform)
     if not client_id or not client_secret:
         raise HTTPException(503, "The developer app configuration is missing")
@@ -1130,7 +1311,7 @@ async def oauth_callback(platform: str, request: Request, state: str = "", code:
             token_data = response.json()
             values = {"access_token": token_data.get("access_token"), "refresh_token": token_data.get("refresh_token"),
                       "expires_at": now + int(token_data.get("expires_in", 3600)), "connected_at": now, "oauth": True}
-        else:
+        elif platform == "tiktok":
             response = httpx.post(
                 "https://open.tiktokapis.com/v2/oauth/token/",
                 data={"client_key": client_id, "client_secret": client_secret, "code": code,
@@ -1141,6 +1322,35 @@ async def oauth_callback(platform: str, request: Request, state: str = "", code:
             token_data = response.json()
             values = {"access_token": token_data.get("access_token"), "refresh_token": token_data.get("refresh_token"),
                       "open_id": token_data.get("open_id"), "expires_at": now + int(token_data.get("expires_in", 86400)),
+                      "connected_at": now, "oauth": True}
+        elif platform == "x":
+            response = httpx.post(
+                "https://api.x.com/2/oauth2/token",
+                data={"code": code, "grant_type": "authorization_code", "client_id": client_id,
+                      "client_secret": client_secret, "redirect_uri": redirect_uri,
+                      "code_verifier": x_pkce_verifier(state)}, timeout=30,
+            )
+            response.raise_for_status()
+            token_data = response.json()
+            values = {"access_token": token_data.get("access_token"), "refresh_token": token_data.get("refresh_token"),
+                      "expires_at": now + int(token_data.get("expires_in", 7200)), "connected_at": now, "oauth": True}
+        else:
+            response = httpx.post(
+                "https://accounts.snapchat.com/login/oauth2/access_token",
+                data={"client_id": client_id, "client_secret": client_secret, "code": code,
+                      "grant_type": "authorization_code", "redirect_uri": redirect_uri}, timeout=30,
+            )
+            response.raise_for_status()
+            token_data = response.json()
+            token = token_data.get("access_token")
+            profile = httpx.get("https://businessapi.snapchat.com/v1/public_profiles/my_profile",
+                                headers={"Authorization": f"Bearer {token}"}, timeout=30)
+            profile.raise_for_status()
+            profile_data = profile.json()
+            profile_id = (profile_data.get("public_profile") or profile_data.get("profile") or {}).get("id")
+            profile_id = profile_id or profile_data.get("profile_id") or profile_data.get("id")
+            values = {"access_token": token, "refresh_token": token_data.get("refresh_token"),
+                      "expires_at": now + int(token_data.get("expires_in", 3600)), "profile_id": profile_id,
                       "connected_at": now, "oauth": True}
         if not values.get("access_token"):
             raise RuntimeError("The platform did not return posting authorization")
@@ -1197,6 +1407,22 @@ async def save_customer_apis(request: Request):
             clean = {str(key)[:40]: str(value).strip()[:4000] for key, value in values.items() if str(value).strip()}
             if not clean:
                 continue
+            if platform == "dailymotion" and (clean.get("client_id") or clean.get("client_secret")):
+                if not all(clean.get(key) for key in ("client_id", "client_secret", "profile_id")):
+                    raise HTTPException(400, "Enter the Dailymotion profile ID, API key and API secret")
+                try:
+                    token_response = httpx.post(
+                        "https://oauth2.dailymotion.com/v2/token",
+                        data={"grant_type": "client_credentials", "client_id": clean["client_id"],
+                              "client_secret": clean["client_secret"], "scope": "video.manage"}, timeout=30,
+                    )
+                    token_response.raise_for_status()
+                    token_data = token_response.json()
+                    clean["access_token"] = token_data["access_token"]
+                    clean["expires_at"] = str(int(time.time()) + int(token_data.get("expires_in", 3600)))
+                    clean["connected_at"] = str(int(time.time()))
+                except Exception as exc:
+                    raise HTTPException(400, "Dailymotion could not verify those API details") from exc
             existing = connection.execute(
                 "SELECT encrypted_data FROM api_credentials WHERE user_id = ? AND platform = ?",
                 (customer["id"], platform),

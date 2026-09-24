@@ -1,14 +1,14 @@
-# ClipMagic Working Engine
+# ClipMagic Automation Engine
 
-This repository now contains a real FastAPI + FFmpeg clipping service for Render.
+This repository contains a Render-ready clipping and publishing service.
 
 - Main site: `/`
 - Owner control panel: `/control-panel.html`
-- Uploads user-owned video files.
-- Creates 1–5 real vertical MP4 clips.
-- Adds the streamer title, page name and FOLLOW branding.
-- Provides playable/downloadable results.
-- Deletes temporary uploads and clips automatically after one hour.
-- Keeps social publishing locked until official OAuth authorization is configured.
+- Registered user workspaces and up to seven saved automation projects.
+- FFmpeg clipping, scene-change selection, vertical formatting and page-name/FOLLOW branding.
+- Optional speech-based title generation when `OPENAI_API_KEY` is configured.
+- A persistent publishing queue with retries, delivery status and automatic file cleanup.
+- Facebook Page, Instagram Reels, YouTube and TikTok posting adapters.
+- Pause, resume, delete and authorized source-video ingestion controls.
 
-The Render Blueprint retains the original static demonstration and adds the working Docker service as `clipmagic-engine`.
+Every destination needs a valid official access token with posting permission. TikTok Direct Post and unverified YouTube projects remain subject to platform review. A public page URL alone does not authorize or provide an official download of its source videos; a source connector must deliver media the user owns or is allowed to reuse. Free Render storage is temporary, so production should use an always-on service with persistent storage/database.

@@ -14,7 +14,9 @@ import threading
 import time
 import uuid
 from pathlib import Path
+from urllib.parse import urlparse
 
+import httpx
 from cryptography.fernet import Fernet
 from fastapi import BackgroundTasks, FastAPI, File, Form, HTTPException, Request, UploadFile
 from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, RedirectResponse
@@ -43,6 +45,7 @@ app = FastAPI(title="ClipMagic Engine", version="1.0.0")
 jobs: dict[str, dict] = {}
 jobs_lock = threading.Lock()
 processing_slot = threading.Semaphore(max(1, int(os.environ.get("CLIPMAGIC_MAX_ACTIVE_JOBS", "1"))))
+publisher_wakeup = threading.Event()
 
 
 def job_state_path(job_id: str) -> Path:
@@ -99,8 +102,105 @@ def initialize_database() -> None:
                 PRIMARY KEY (user_id, platform),
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS automation_projects (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                name TEXT NOT NULL,
+                source_url TEXT NOT NULL,
+                source_platform TEXT NOT NULL,
+                streamer_name TEXT NOT NULL,
+                page_name TEXT NOT NULL,
+                monitor_new INTEGER NOT NULL DEFAULT 1,
+                import_history INTEGER NOT NULL DEFAULT 0,
+                clip_count INTEGER NOT NULL DEFAULT 3,
+                clip_length INTEGER NOT NULL DEFAULT 30,
+                sound_choice TEXT NOT NULL DEFAULT 'No added sound',
+                status TEXT NOT NULL DEFAULT 'paused',
+                last_checked_at INTEGER,
+                last_error TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS project_destinations (
+                project_id TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                account_link TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                PRIMARY KEY (project_id, platform),
+                FOREIGN KEY (project_id) REFERENCES automation_projects(id) ON DELETE CASCADE
+            );
+            CREATE TABLE IF NOT EXISTS publish_queue (
+                id TEXT PRIMARY KEY,
+                user_id INTEGER NOT NULL,
+                project_id TEXT,
+                job_id TEXT NOT NULL,
+                filename TEXT NOT NULL,
+                platform TEXT NOT NULL,
+                title TEXT NOT NULL,
+                hashtags TEXT NOT NULL DEFAULT '',
+                status TEXT NOT NULL DEFAULT 'queued',
+                attempts INTEGER NOT NULL DEFAULT 0,
+                next_attempt_at INTEGER NOT NULL,
+                remote_id TEXT,
+                last_error TEXT,
+                created_at INTEGER NOT NULL,
+                updated_at INTEGER NOT NULL,
+                FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+            );
+            CREATE INDEX IF NOT EXISTS idx_publish_ready ON publish_queue(status, next_attempt_at);
+            CREATE TABLE IF NOT EXISTS project_events (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id TEXT NOT NULL,
+                level TEXT NOT NULL,
+                message TEXT NOT NULL,
+                created_at INTEGER NOT NULL,
+                FOREIGN KEY (project_id) REFERENCES automation_projects(id) ON DELETE CASCADE
+            );
             """
         )
+
+
+SUPPORTED_DESTINATIONS = {"facebook", "instagram", "youtube", "tiktok"}
+
+
+def source_platform(url: str) -> str:
+    host = (urlparse(url).hostname or "").lower()
+    if "youtube.com" in host or "youtu.be" in host:
+        return "youtube"
+    if "facebook.com" in host or "fb.watch" in host:
+        return "facebook"
+    if "instagram.com" in host:
+        return "instagram"
+    if "tiktok.com" in host:
+        return "tiktok"
+    return "other"
+
+
+def add_event(project_id: str, message: str, level: str = "info") -> None:
+    with database() as connection:
+        connection.execute(
+            "INSERT INTO project_events (project_id, level, message, created_at) VALUES (?, ?, ?, ?)",
+            (project_id, level, message[:500], int(time.time())),
+        )
+
+
+def credentials_for(user_id: int, platform: str) -> dict:
+    with database() as connection:
+        row = connection.execute(
+            "SELECT encrypted_data FROM api_credentials WHERE user_id = ? AND platform = ?",
+            (user_id, platform),
+        ).fetchone()
+    if not row:
+        return {}
+    try:
+        return json.loads(API_CIPHER.decrypt(row["encrypted_data"].encode()).decode())
+    except Exception:
+        return {}
+
+
+def public_base_url() -> str:
+    return os.environ.get("CLIPMAGIC_PUBLIC_URL", "https://clipmagic-engine.onrender.com").rstrip("/")
 
 
 def hash_password(password: str) -> str:
@@ -190,6 +290,45 @@ def probe_duration(path: Path) -> float:
     return duration
 
 
+def highlight_starts(path: Path, duration: float, clip_length: int, clip_count: int) -> tuple[list[float], str]:
+    """Prefer high-motion scene changes, then fall back to even coverage."""
+    usable = max(0.0, duration - clip_length)
+    if clip_count == 1 or usable <= 0:
+        return [0.0], "full-video"
+    command = [
+        "ffmpeg", "-hide_banner", "-nostdin", "-i", str(path), "-an",
+        "-vf", "select='gt(scene,0.12)',metadata=print", "-f", "null", "-",
+    ]
+    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    text_output = completed.stdout + "\n" + completed.stderr
+    candidates: list[tuple[float, float]] = []
+    current_time: float | None = None
+    for line in text_output.splitlines():
+        time_match = re.search(r"pts_time:([0-9.]+)", line)
+        if time_match:
+            current_time = float(time_match.group(1))
+        score_match = re.search(r"lavfi\.scene_score=([0-9.]+)", line)
+        if score_match and current_time is not None:
+            candidates.append((float(score_match.group(1)), current_time))
+    selected: list[float] = []
+    for _, moment in sorted(candidates, reverse=True):
+        start = max(0.0, min(usable, moment - clip_length * 0.25))
+        if all(abs(start - existing) >= clip_length * 0.65 for existing in selected):
+            selected.append(start)
+        if len(selected) >= clip_count:
+            break
+    if selected:
+        selected.sort()
+        while len(selected) < clip_count:
+            fallback = usable * (len(selected) + 1) / (clip_count + 1)
+            if all(abs(fallback - existing) >= max(1, clip_length * 0.25) for existing in selected):
+                selected.append(fallback)
+            else:
+                break
+        return sorted(selected[:clip_count]), "scene-change"
+    return [usable * (index + 1) / (clip_count + 1) for index in range(clip_count)], "even-coverage"
+
+
 def update_job(job_id: str, **changes) -> None:
     with jobs_lock:
         if job_id in jobs:
@@ -197,8 +336,85 @@ def update_job(job_id: str, **changes) -> None:
             save_job_state(job_id)
 
 
+def generate_post_title(video_path: Path, streamer_name: str, index: int) -> tuple[str, str]:
+    """Use speech understanding when configured; always retain a safe offline fallback."""
+    fallbacks = [
+        f"{streamer_name} could not believe this moment",
+        f"{streamer_name}'s reaction says everything",
+        f"Wait for {streamer_name}'s unexpected ending",
+        f"{streamer_name} delivered an unforgettable moment",
+        f"This {streamer_name} highlight deserves a replay",
+    ]
+    title = fallbacks[(index - 1) % len(fallbacks)]
+    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
+    if not api_key:
+        return title, "offline-template"
+    try:
+        headers = {"Authorization": f"Bearer {api_key}"}
+        with video_path.open("rb") as media:
+            transcript_response = httpx.post(
+                "https://api.openai.com/v1/audio/transcriptions",
+                headers=headers,
+                files={"file": (video_path.name, media, "video/mp4")},
+                data={"model": os.environ.get("CLIPMAGIC_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")},
+                timeout=90,
+            )
+        transcript_response.raise_for_status()
+        transcript = transcript_response.json().get("text", "").strip()
+        if not transcript:
+            return title, "offline-template"
+        prompt = (
+            "Write one accurate, exciting social-video title under 80 characters. "
+            f"Include the creator name {streamer_name}. Do not invent facts. "
+            "Return only the title. Transcript: " + transcript[:5000]
+        )
+        response = httpx.post(
+            "https://api.openai.com/v1/responses",
+            headers={**headers, "Content-Type": "application/json"},
+            json={"model": os.environ.get("CLIPMAGIC_AI_MODEL", "gpt-4.1-mini"), "input": prompt},
+            timeout=60,
+        )
+        response.raise_for_status()
+        generated = response.json().get("output_text", "").strip().strip('"')
+        if generated:
+            return generated[:100], "speech-ai"
+    except Exception:
+        pass
+    return title, "offline-template"
+
+
+def enqueue_outputs(user_id: int, project_id: str, job_id: str, outputs: list[dict]) -> None:
+    now = int(time.time())
+    with database() as connection:
+        destinations = connection.execute(
+            "SELECT platform FROM project_destinations WHERE project_id = ? AND enabled = 1",
+            (project_id,),
+        ).fetchall()
+        for output in outputs:
+            for destination in destinations:
+                connection.execute(
+                    "INSERT INTO publish_queue (id, user_id, project_id, job_id, filename, platform, title, hashtags, status, attempts, next_attempt_at, created_at, updated_at) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'queued', 0, ?, ?, ?)",
+                    (uuid.uuid4().hex, user_id, project_id, job_id, output["name"], destination["platform"],
+                     output["post_title"], output["hashtags"], now, now, now),
+                )
+    add_event(project_id, f"{len(outputs)} clips created and added to the publishing queue")
+    publisher_wakeup.set()
+
+
+def remove_fully_published_job(job_id: str) -> None:
+    with database() as connection:
+        statuses = [row[0] for row in connection.execute(
+            "SELECT status FROM publish_queue WHERE job_id = ?", (job_id,)
+        ).fetchall()]
+    if statuses and all(status == "posted" for status in statuses):
+        jobs.pop(job_id, None)
+        shutil.rmtree(WORK_ROOT / job_id, ignore_errors=True)
+
+
 def process_job(job_id: str, input_path: Path, page_name: str, streamer_name: str,
-                clip_count: int, clip_length: int) -> None:
+                clip_count: int, clip_length: int, user_id: int | None = None,
+                project_id: str | None = None) -> None:
     job_dir = input_path.parent
     try:
         update_job(job_id, status="queued", progress=2, message="Waiting for the video processor")
@@ -206,21 +422,9 @@ def process_job(job_id: str, input_path: Path, page_name: str, streamer_name: st
             update_job(job_id, status="processing", progress=5, message="Reading the video")
             duration = probe_duration(input_path)
             actual_length = max(3, min(clip_length, int(duration)))
-            usable = max(0.0, duration - actual_length)
-
-            if clip_count == 1 or usable <= 0:
-                starts = [0.0]
-            else:
-                starts = [usable * (index + 1) / (clip_count + 1) for index in range(clip_count)]
+            starts, selection_source = highlight_starts(input_path, duration, actual_length, clip_count)
 
             outputs = []
-            post_title_templates = [
-                f"{streamer_name} could not believe this moment",
-                f"{streamer_name}'s reaction says everything",
-                f"Wait for {streamer_name}'s unexpected ending",
-                f"{streamer_name} delivered an unforgettable moment",
-                f"This {streamer_name} highlight deserves a replay",
-            ]
             streamer_tag = re.sub(r"[^A-Za-z0-9]", "", streamer_name)[:32] or "Highlights"
             page_tag = re.sub(r"[^A-Za-z0-9]", "", page_name)[:32] or "Clips"
             for index, start in enumerate(starts, 1):
@@ -251,12 +455,15 @@ def process_job(job_id: str, input_path: Path, page_name: str, streamer_name: st
                     "-tune", "zerolatency", "-crf", "26", "-c:a", "aac", "-b:a", "96k",
                     "-movflags", "+faststart", str(output_path),
                 ])
+                post_title, title_source = generate_post_title(output_path, streamer_name, index)
                 outputs.append({
                     "name": output_name,
                     "title": f"{streamer_name} highlight {index}",
-                    "post_title": post_title_templates[index - 1],
+                    "post_title": post_title,
+                    "title_source": title_source,
                     "hashtags": f"#{streamer_tag} #{page_tag} #Highlights #TrendingClips",
                     "seconds": actual_length,
+                    "selection_source": selection_source,
                     "url": f"/api/jobs/{job_id}/files/{output_name}",
                 })
                 update_job(
@@ -274,6 +481,8 @@ def process_job(job_id: str, input_path: Path, page_name: str, streamer_name: st
                 outputs=outputs,
                 expires_at=int(time.time() + JOB_TTL_SECONDS),
             )
+            if user_id and project_id:
+                enqueue_outputs(user_id, project_id, job_id, outputs)
     except Exception as exc:
         input_path.unlink(missing_ok=True)
         update_job(job_id, status="failed", progress=100, message=str(exc)[:300])
@@ -294,17 +503,224 @@ def cleanup_expired() -> None:
         time.sleep(60)
 
 
+def resolve_meta_account(platform: str, credentials: dict) -> tuple[str, str]:
+    token = credentials.get("access_token") or credentials.get("api_token")
+    if not token:
+        raise RuntimeError("Connect this Meta account before automatic posting")
+    graph_version = os.environ.get("META_GRAPH_VERSION", "v23.0")
+    page_id = credentials.get("page_id") or credentials.get("account_id")
+    page_token = token
+    if not page_id:
+        response = httpx.get(
+            f"https://graph.facebook.com/{graph_version}/me/accounts",
+            params={"fields": "id,name,link,access_token,instagram_business_account{id,username}", "access_token": token},
+            timeout=30,
+        )
+        response.raise_for_status()
+        accounts = response.json().get("data", [])
+        if not accounts:
+            raise RuntimeError("No authorized Facebook Page was found")
+        account = accounts[0]
+        page_token = account.get("access_token") or token
+        if platform == "instagram":
+            page_id = (account.get("instagram_business_account") or {}).get("id")
+            if not page_id:
+                raise RuntimeError("The authorized Page has no connected Instagram professional account")
+        else:
+            page_id = account.get("id")
+    return str(page_id), str(page_token)
+
+
+def publish_facebook(path: Path, title: str, hashtags: str, credentials: dict) -> str:
+    page_id, token = resolve_meta_account("facebook", credentials)
+    version = os.environ.get("META_GRAPH_VERSION", "v23.0")
+    with path.open("rb") as video:
+        response = httpx.post(
+            f"https://graph-video.facebook.com/{version}/{page_id}/videos",
+            data={"access_token": token, "description": f"{title}\n\n{hashtags}".strip()},
+            files={"source": (path.name, video, "video/mp4")},
+            timeout=300,
+        )
+    response.raise_for_status()
+    return str(response.json().get("id") or "uploaded")
+
+
+def publish_instagram(job_id: str, filename: str, title: str, hashtags: str, credentials: dict) -> str:
+    account_id, token = resolve_meta_account("instagram", credentials)
+    version = os.environ.get("META_GRAPH_VERSION", "v23.0")
+    create = httpx.post(
+        f"https://graph.facebook.com/{version}/{account_id}/media",
+        data={
+            "media_type": "REELS",
+            "video_url": f"{public_base_url()}/api/jobs/{job_id}/files/{filename}",
+            "caption": f"{title}\n\n{hashtags}".strip(),
+            "share_to_feed": "true",
+            "access_token": token,
+        },
+        timeout=60,
+    )
+    create.raise_for_status()
+    container_id = create.json().get("id")
+    if not container_id:
+        raise RuntimeError("Instagram did not create a Reel container")
+    for _ in range(18):
+        time.sleep(5)
+        status = httpx.get(
+            f"https://graph.facebook.com/{version}/{container_id}",
+            params={"fields": "status_code,status", "access_token": token}, timeout=30,
+        )
+        status.raise_for_status()
+        code = status.json().get("status_code")
+        if code == "FINISHED":
+            break
+        if code in {"ERROR", "EXPIRED"}:
+            raise RuntimeError(status.json().get("status") or "Instagram could not process the Reel")
+    else:
+        raise RuntimeError("Instagram is still processing the Reel; it will be retried")
+    publish = httpx.post(
+        f"https://graph.facebook.com/{version}/{account_id}/media_publish",
+        data={"creation_id": container_id, "access_token": token}, timeout=60,
+    )
+    publish.raise_for_status()
+    return str(publish.json().get("id") or container_id)
+
+
+def publish_youtube(path: Path, title: str, hashtags: str, credentials: dict) -> str:
+    token = credentials.get("access_token") or credentials.get("api_token")
+    if not token:
+        raise RuntimeError("Connect YouTube before automatic posting")
+    metadata = {
+        "snippet": {"title": title[:100], "description": hashtags, "categoryId": "22"},
+        "status": {"privacyStatus": credentials.get("privacy_status", "public"), "selfDeclaredMadeForKids": False},
+    }
+    with path.open("rb") as video:
+        response = httpx.post(
+            "https://www.googleapis.com/upload/youtube/v3/videos",
+            params={"uploadType": "multipart", "part": "snippet,status"},
+            headers={"Authorization": f"Bearer {token}"},
+            files={
+                "metadata": (None, json.dumps(metadata), "application/json; charset=UTF-8"),
+                "media": (path.name, video, "video/mp4"),
+            },
+            timeout=300,
+        )
+    response.raise_for_status()
+    return str(response.json().get("id") or "uploaded")
+
+
+def publish_tiktok(path: Path, title: str, hashtags: str, credentials: dict) -> str:
+    token = credentials.get("access_token") or credentials.get("api_token")
+    if not token:
+        raise RuntimeError("Connect TikTok before automatic posting")
+    size = path.stat().st_size
+    caption = f"{title} {hashtags}".strip()[:2200]
+    initialize = httpx.post(
+        "https://open.tiktokapis.com/v2/post/publish/video/init/",
+        headers={"Authorization": f"Bearer {token}", "Content-Type": "application/json; charset=UTF-8"},
+        json={
+            "post_info": {"title": caption, "privacy_level": credentials.get("privacy_level", "PUBLIC_TO_EVERYONE"),
+                          "disable_duet": False, "disable_comment": False, "disable_stitch": False},
+            "source_info": {"source": "FILE_UPLOAD", "video_size": size, "chunk_size": size, "total_chunk_count": 1},
+        },
+        timeout=60,
+    )
+    initialize.raise_for_status()
+    body = initialize.json()
+    if (body.get("error") or {}).get("code") not in {None, "ok"}:
+        raise RuntimeError((body.get("error") or {}).get("message") or "TikTok rejected the upload")
+    data = body.get("data") or {}
+    upload_url, publish_id = data.get("upload_url"), data.get("publish_id")
+    if not upload_url or not publish_id:
+        raise RuntimeError("TikTok did not provide an upload address")
+    with path.open("rb") as video:
+        upload = httpx.put(upload_url, headers={"Content-Type": "video/mp4", "Content-Range": f"bytes 0-{size - 1}/{size}"},
+                           content=video, timeout=300)
+    upload.raise_for_status()
+    return str(publish_id)
+
+
+def publish_one(row: sqlite3.Row) -> str:
+    path = WORK_ROOT / row["job_id"] / row["filename"]
+    if not path.is_file():
+        raise RuntimeError("The temporary clip expired before it could be posted")
+    credentials = credentials_for(row["user_id"], row["platform"])
+    if not (credentials.get("access_token") or credentials.get("api_token")):
+        raise PermissionError(f"Connect {row['platform'].title()} before automatic posting")
+    if row["platform"] == "facebook":
+        return publish_facebook(path, row["title"], row["hashtags"], credentials)
+    if row["platform"] == "instagram":
+        return publish_instagram(row["job_id"], row["filename"], row["title"], row["hashtags"], credentials)
+    if row["platform"] == "youtube":
+        return publish_youtube(path, row["title"], row["hashtags"], credentials)
+    if row["platform"] == "tiktok":
+        return publish_tiktok(path, row["title"], row["hashtags"], credentials)
+    raise PermissionError("Automatic posting is not available for this platform yet")
+
+
+def publisher_loop() -> None:
+    while True:
+        now = int(time.time())
+        with database() as connection:
+            row = connection.execute(
+                "SELECT * FROM publish_queue WHERE status IN ('queued','retry') AND next_attempt_at <= ? ORDER BY created_at LIMIT 1",
+                (now,),
+            ).fetchone()
+            if row:
+                connection.execute("UPDATE publish_queue SET status='posting', updated_at=? WHERE id=?", (now, row["id"]))
+        if not row:
+            publisher_wakeup.wait(10)
+            publisher_wakeup.clear()
+            continue
+        try:
+            remote_id = publish_one(row)
+            with database() as connection:
+                connection.execute(
+                    "UPDATE publish_queue SET status='posted', remote_id=?, last_error=NULL, updated_at=? WHERE id=?",
+                    (remote_id, int(time.time()), row["id"]),
+                )
+            if row["project_id"]:
+                add_event(row["project_id"], f"Posted {row['filename']} to {row['platform'].title()}", "success")
+            remove_fully_published_job(row["job_id"])
+        except PermissionError as exc:
+            with database() as connection:
+                connection.execute(
+                    "UPDATE publish_queue SET status='blocked', last_error=?, updated_at=? WHERE id=?",
+                    (str(exc)[:500], int(time.time()), row["id"]),
+                )
+            if row["project_id"]:
+                add_event(row["project_id"], str(exc), "warning")
+        except Exception as exc:
+            attempts = row["attempts"] + 1
+            status = "failed" if attempts >= 5 else "retry"
+            retry_at = int(time.time()) + min(3600, 30 * (2 ** attempts))
+            with database() as connection:
+                connection.execute(
+                    "UPDATE publish_queue SET status=?, attempts=?, next_attempt_at=?, last_error=?, updated_at=? WHERE id=?",
+                    (status, attempts, retry_at, str(exc)[:500], int(time.time()), row["id"]),
+                )
+            if row["project_id"]:
+                add_event(row["project_id"], f"{row['platform'].title()} post failed: {str(exc)[:180]}", "error")
+
+
 @app.on_event("startup")
 async def startup() -> None:
     initialize_database()
     for path in WORK_ROOT.glob("*/job.json"):
         load_job_state(path.parent.name)
     threading.Thread(target=cleanup_expired, daemon=True).start()
+    threading.Thread(target=publisher_loop, daemon=True).start()
 
 
 @app.get("/health")
 async def health() -> dict:
-    return {"status": "ok", "engine": "ffmpeg", "temporary_storage": True}
+    return {
+        "status": "ok",
+        "engine": "ffmpeg",
+        "automation_queue": True,
+        "automatic_cleanup": True,
+        "temporary_storage": True,
+        "platforms": sorted(SUPPORTED_DESTINATIONS),
+    }
 
 
 def login_page(message: str = "") -> HTMLResponse:
@@ -479,7 +895,200 @@ async def save_customer_apis(request: Request):
                 (customer["id"], platform, encrypted, int(time.time())),
             )
             saved.append(platform)
+            if platform in SUPPORTED_DESTINATIONS:
+                connection.execute(
+                    "UPDATE publish_queue SET status='queued', next_attempt_at=?, last_error=NULL, updated_at=? "
+                    "WHERE user_id=? AND platform=? AND status='blocked'",
+                    (int(time.time()), int(time.time()), customer["id"], platform),
+                )
+                publisher_wakeup.set()
     return {"saved": saved, "message": "Your API details were saved privately."}
+
+
+def project_payload(row: sqlite3.Row) -> dict:
+    with database() as connection:
+        destinations = [dict(item) for item in connection.execute(
+            "SELECT platform, account_link, enabled FROM project_destinations WHERE project_id = ? ORDER BY platform",
+            (row["id"],),
+        ).fetchall()]
+        counts = {item["status"]: item["count"] for item in connection.execute(
+            "SELECT status, COUNT(*) AS count FROM publish_queue WHERE project_id = ? GROUP BY status",
+            (row["id"],),
+        ).fetchall()}
+        events = [dict(item) for item in connection.execute(
+            "SELECT level, message, created_at FROM project_events WHERE project_id = ? ORDER BY id DESC LIMIT 8",
+            (row["id"],),
+        ).fetchall()]
+    data = dict(row)
+    data["monitor_new"] = bool(data["monitor_new"])
+    data["import_history"] = bool(data["import_history"])
+    data["destinations"] = destinations
+    data["queue"] = counts
+    data["events"] = events
+    return data
+
+
+@app.get("/api/automation/projects")
+async def list_projects(request: Request):
+    customer = current_customer(request)
+    if not customer:
+        raise HTTPException(401, "Please log in")
+    with database() as connection:
+        rows = connection.execute(
+            "SELECT * FROM automation_projects WHERE user_id = ? ORDER BY created_at DESC", (customer["id"],)
+        ).fetchall()
+    return {"projects": [project_payload(row) for row in rows], "maximum": 7}
+
+
+@app.post("/api/automation/projects")
+async def create_project(request: Request):
+    customer = current_customer(request)
+    if not customer:
+        raise HTTPException(401, "Please log in")
+    payload = await request.json()
+    source_url = str(payload.get("source_url", "")).strip()
+    parsed = urlparse(source_url)
+    if parsed.scheme not in {"http", "https"} or not parsed.hostname:
+        raise HTTPException(400, "Enter a valid streamer page link")
+    streamer_name = str(payload.get("streamer_name", "")).strip()[:70]
+    page_name = str(payload.get("page_name", "")).strip()[:70]
+    if not streamer_name or not page_name:
+        raise HTTPException(400, "Enter the streamer name and your page name")
+    requested = payload.get("destinations") or []
+    if not isinstance(requested, list):
+        raise HTTPException(400, "Choose at least one destination")
+    destinations = []
+    for item in requested:
+        if not isinstance(item, dict) or item.get("platform") not in SUPPORTED_DESTINATIONS:
+            continue
+        link = str(item.get("account_link", "")).strip()
+        if link:
+            destinations.append((item["platform"], link[:1000]))
+    if not destinations:
+        raise HTTPException(400, "Save and choose at least one supported destination")
+    unauthorized = [platform for platform, _ in destinations
+                    if not (credentials_for(customer["id"], platform).get("access_token")
+                            or credentials_for(customer["id"], platform).get("api_token"))]
+    if unauthorized:
+        names = ", ".join(platform.title() for platform in unauthorized)
+        raise HTTPException(400, f"Add official API authorization for: {names}")
+    with database() as connection:
+        count = connection.execute("SELECT COUNT(*) FROM automation_projects WHERE user_id = ?", (customer["id"],)).fetchone()[0]
+        if count >= 7:
+            raise HTTPException(400, "You already have 7 clipping connections")
+        project_id = uuid.uuid4().hex
+        now = int(time.time())
+        clip_count = max(1, min(int(payload.get("clip_count", 3)), 5))
+        clip_length = max(3, min(int(payload.get("clip_length", 30)), 90))
+        connection.execute(
+            "INSERT INTO automation_projects (id,user_id,name,source_url,source_platform,streamer_name,page_name,monitor_new,import_history,clip_count,clip_length,sound_choice,status,created_at,updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
+            (project_id, customer["id"], str(payload.get("name") or f"{streamer_name} clips")[:100], source_url,
+             source_platform(source_url), streamer_name, page_name, bool(payload.get("monitor_new", True)),
+             bool(payload.get("import_history", False)), clip_count, clip_length,
+             str(payload.get("sound_choice", "No added sound"))[:100], "active", now, now),
+        )
+        for platform, link in destinations:
+            connection.execute(
+                "INSERT INTO project_destinations (project_id,platform,account_link,enabled) VALUES (?,?,?,1)",
+                (project_id, platform, link),
+            )
+        row = connection.execute("SELECT * FROM automation_projects WHERE id = ?", (project_id,)).fetchone()
+    add_event(project_id, "Automation connection created. Waiting for an authorized source video.", "success")
+    return JSONResponse(project_payload(row), status_code=201)
+
+
+@app.patch("/api/automation/projects/{project_id}")
+async def update_project(project_id: str, request: Request):
+    customer = current_customer(request)
+    if not customer:
+        raise HTTPException(401, "Please log in")
+    payload = await request.json()
+    status = payload.get("status")
+    if status not in {"active", "paused"}:
+        raise HTTPException(400, "Status must be active or paused")
+    with database() as connection:
+        result = connection.execute(
+            "UPDATE automation_projects SET status=?, updated_at=? WHERE id=? AND user_id=?",
+            (status, int(time.time()), project_id, customer["id"]),
+        )
+        if not result.rowcount:
+            raise HTTPException(404, "Connection not found")
+        row = connection.execute("SELECT * FROM automation_projects WHERE id=?", (project_id,)).fetchone()
+    add_event(project_id, "Automation resumed" if status == "active" else "Automation paused")
+    return project_payload(row)
+
+
+@app.delete("/api/automation/projects/{project_id}")
+async def delete_project(project_id: str, request: Request):
+    customer = current_customer(request)
+    if not customer:
+        raise HTTPException(401, "Please log in")
+    with database() as connection:
+        result = connection.execute("DELETE FROM automation_projects WHERE id=? AND user_id=?", (project_id, customer["id"]))
+    if not result.rowcount:
+        raise HTTPException(404, "Connection not found")
+    return {"deleted": True}
+
+
+@app.get("/api/automation/queue")
+async def get_publish_queue(request: Request):
+    customer = current_customer(request)
+    if not customer:
+        raise HTTPException(401, "Please log in")
+    with database() as connection:
+        rows = connection.execute(
+            "SELECT id,project_id,platform,title,status,attempts,remote_id,last_error,created_at,updated_at FROM publish_queue "
+            "WHERE user_id=? ORDER BY created_at DESC LIMIT 100", (customer["id"],)
+        ).fetchall()
+    return {"items": [dict(row) for row in rows]}
+
+
+async def store_upload(video: UploadFile, job_id: str) -> Path:
+    if not (video.content_type or "").startswith("video/"):
+        raise HTTPException(400, "Please upload a video file")
+    job_dir = WORK_ROOT / job_id
+    job_dir.mkdir(parents=True)
+    suffix = Path(video.filename or "video.mp4").suffix.lower()
+    if suffix not in {".mp4", ".mov", ".mkv", ".webm", ".m4v"}:
+        suffix = ".mp4"
+    input_path = job_dir / f"source{suffix}"
+    total = 0
+    with input_path.open("wb") as destination:
+        while chunk := await video.read(1024 * 1024):
+            total += len(chunk)
+            if total > MAX_UPLOAD_BYTES:
+                destination.close()
+                shutil.rmtree(job_dir, ignore_errors=True)
+                raise HTTPException(413, f"Video is larger than {MAX_UPLOAD_BYTES // 1024 // 1024} MB")
+            destination.write(chunk)
+    await video.close()
+    return input_path
+
+
+@app.post("/api/automation/projects/{project_id}/ingest")
+async def ingest_project_video(project_id: str, background_tasks: BackgroundTasks, request: Request,
+                               video: UploadFile = File(...)):
+    customer = current_customer(request)
+    if not customer:
+        raise HTTPException(401, "Please log in")
+    with database() as connection:
+        project = connection.execute(
+            "SELECT * FROM automation_projects WHERE id=? AND user_id=?", (project_id, customer["id"])
+        ).fetchone()
+    if not project:
+        raise HTTPException(404, "Connection not found")
+    if project["status"] != "active":
+        raise HTTPException(409, "Resume this connection before adding a source video")
+    job_id = uuid.uuid4().hex
+    input_path = await store_upload(video, job_id)
+    jobs[job_id] = {"id": job_id, "status": "queued", "progress": 0, "message": "Authorized source video queued",
+                    "outputs": [], "created_at": int(time.time()), "expires_at": int(time.time() + max(JOB_TTL_SECONDS, 86400))}
+    save_job_state(job_id)
+    add_event(project_id, "A new authorized source video entered the clip queue")
+    background_tasks.add_task(process_job, job_id, input_path, project["page_name"], project["streamer_name"],
+                              project["clip_count"], project["clip_length"], customer["id"], project_id)
+    return JSONResponse(jobs[job_id], status_code=202)
 
 
 @app.post("/api/jobs")

@@ -136,7 +136,7 @@
             <div class="name-row"><label for="streamerName">Streamer name used in every post</label><input id="streamerName" value="Carter Efe" placeholder="Example: Carter Efe"></div>
             <div class="source-preview" id="sourcePreview" hidden><div class="source-avatar" id="sourceAvatar">C</div><div><b id="connectedName">Carter Efe connected</b><span id="sourceText">Source channel</span></div><div class="watch">● Watching</div></div>
             <div class="source-modes">
-              <div class="mode-row"><div class="mode-copy"><b>Monitor new videos 24/7</b><span>Automatically clip every new video posted on your old page.</span></div><label class="toggle"><input id="monitorNew" type="checkbox" checked><span class="toggle-track"></span></label></div>
+              <div class="mode-row"><div class="mode-copy"><b>Monitor new videos 24/7</b><span>Runs automatically after the source platform authorizes video access.</span></div><label class="toggle"><input id="monitorNew" type="checkbox" checked><span class="toggle-track"></span></label></div>
               <div class="mode-row"><div class="mode-copy"><b>Import old videos</b><span>Turn this on only when you want clips made from your old video library.</span></div><label class="toggle"><input id="importHistory" type="checkbox"><span class="toggle-track"></span></label></div>
               <div class="history-options" id="historyOptions" hidden><div class="history-actions"><button class="tiny" id="importRecent">Import latest 20</button><button class="tiny" id="importAll">Import all visible old videos</button></div><p class="history-status" id="historyStatus">Old-video importing is ready.</p></div>
             </div>
@@ -247,7 +247,7 @@
     const monitorNew=document.getElementById('monitorNew');
     const importHistory=document.getElementById('importHistory');
     const startBtn=document.getElementById('startBtn');
-    const connections=[];
+    let connections=[];
     let editingId=null;
     function updateName(){const name=nameInput.value.trim()||'The streamer';document.getElementById('connectedName').textContent=name+' connected';document.getElementById('sourceAvatar').textContent=name.charAt(0).toUpperCase();document.getElementById('clipTitle').innerHTML=name+' couldn’t believe the <em>last-second win!</em>'}
     nameInput.addEventListener('input',updateName);updateName();
@@ -263,7 +263,7 @@
       if(response.status===401)return;
       if(!response.ok)return;
       const data=await response.json();
-      document.querySelectorAll('.dest[data-platform]').forEach(card=>{const platform=card.dataset.platform;const saved=data.configured[platform]&&Object.values(data.configured[platform]).some(Boolean);card.querySelector('.api-saved').classList.toggle('show',Boolean(saved));const link=card.querySelector('[name="account_link"]');if(link&&data.links&&data.links[platform])link.value=data.links[platform]});
+      document.querySelectorAll('.dest[data-platform]').forEach(card=>{const platform=card.dataset.platform;const config=data.configured[platform]||{};const saved=Boolean(config.api_token||config.access_token);card.dataset.authorized=saved?'true':'false';card.querySelector('.api-saved').classList.toggle('show',saved);const link=card.querySelector('[name="account_link"]');if(link&&data.links&&data.links[platform])link.value=data.links[platform]});
     }
     document.querySelectorAll('.save-api').forEach(button=>button.addEventListener('click',async()=>{
       const card=button.closest('.dest');const values={};card.querySelectorAll('input').forEach(input=>{if(input.value.trim())values[input.name]=input.value.trim()});
@@ -273,7 +273,7 @@
       if(response.status===401){window.location.href='/login';return}
       const result=await response.json();button.disabled=false;button.textContent='Save '+card.querySelector('.dest-title b').textContent+' link & API';
       if(!response.ok){say(result.detail||'Could not save');return}
-      card.querySelectorAll('input[type="password"]').forEach(input=>input.value='');card.querySelector('.api-saved').classList.add('show');say('Link and API saved privately')
+      card.querySelectorAll('input[type="password"]').forEach(input=>input.value='');card.dataset.authorized=values.api_token?'true':card.dataset.authorized;card.querySelector('.api-saved').classList.toggle('show',card.dataset.authorized==='true');say(values.api_token?'Link and API saved privately':'Link saved — API authorization is still needed')
     }));
     loadDestinationApis();
     function renderConnections(){
@@ -286,13 +286,14 @@
       connections.forEach(item=>{
         const row=document.createElement('div');row.className='connection-row';row.dataset.id=item.id;
         const sourceMode=(item.monitorNew?'New videos 24/7':'New videos off')+(item.importHistory?' · Old videos on':' · Old videos off');
-        row.innerHTML='<div class="connection-icon">'+item.name.charAt(0).toUpperCase()+'</div><div class="connection-copy"><b>'+item.name+' → '+item.accountName+'</b><span><i class="run">'+(item.active?'● Running':'● Paused')+'</i> · '+sourceMode+' · '+item.platforms+' destination'+(item.platforms===1?'':'s')+' · '+item.sound+'</span></div><div class="connection-actions"><button class="tiny pause">'+(item.active?'Pause':'Resume')+'</button><button class="tiny edit">Edit</button><button class="tiny danger delete">Delete</button></div>';
+        const posted=(item.queue&&item.queue.posted)||0;const waiting=((item.queue&&item.queue.queued)||0)+((item.queue&&item.queue.retry)||0);const blocked=(item.queue&&item.queue.blocked)||0;
+        row.innerHTML='<div class="connection-icon">'+item.name.charAt(0).toUpperCase()+'</div><div class="connection-copy"><b>'+item.name+' → '+item.accountName+'</b><span><i class="run">'+(item.active?'● Running':'● Paused')+'</i> · '+sourceMode+' · '+item.platforms+' destination'+(item.platforms===1?'':'s')+' · '+posted+' posted · '+waiting+' waiting'+(blocked?' · '+blocked+' need authorization':'')+'</span></div><div class="connection-actions"><button class="tiny ingest">Add test video</button><button class="tiny pause">'+(item.active?'Pause':'Resume')+'</button><button class="tiny danger delete">Delete</button></div>';
         list.appendChild(row);
       });
       document.getElementById('topDot').classList.toggle('live',active>0);
       document.getElementById('topStatus').textContent=active?active+' clipping connection'+(active===1?'':'s')+' live':'Ready to connect';
-      document.getElementById('clipCount').textContent=String(active*12);
-      document.getElementById('postCount').textContent=String(connections.filter(item=>item.active).reduce((sum,item)=>sum+12*item.platforms,0));
+      document.getElementById('clipCount').textContent=String(connections.reduce((sum,item)=>sum+Object.values(item.queue||{}).reduce((a,b)=>a+Number(b||0),0),0));
+      document.getElementById('postCount').textContent=String(connections.reduce((sum,item)=>sum+Number((item.queue||{}).posted||0),0));
       document.getElementById('activity').hidden=!active;
     }
     function resetWorkspace(){
@@ -301,14 +302,27 @@
       startBtn.textContent='Start clipping 24/7';startBtn.classList.remove('stop');document.getElementById('launchNote').textContent='Waiting for your connections';updateName();updateAccountName();sourceInput.focus();
     }
     document.getElementById('newConnectionBtn').addEventListener('click',()=>{if(connections.length>=7){say('You already have 7 clipping connections');return}resetWorkspace();document.querySelector('.grid').scrollIntoView({behavior:'smooth'});say('Fresh connection ready — your other clippers keep running')});
-    startBtn.addEventListener('click',()=>{say('Authorize at least one source and destination platform first');document.getElementById('launchNote').textContent='Official platform authorization is required';});
-    document.getElementById('connectionsList').addEventListener('click',event=>{
-      const row=event.target.closest('.connection-row');if(!row)return;const item=connections.find(entry=>entry.id===row.dataset.id);if(!item)return;
-      if(event.target.classList.contains('pause')){item.active=!item.active;renderConnections();say(item.name+(item.active?' resumed':' paused'))}
-      if(event.target.classList.contains('delete')){connections.splice(connections.indexOf(item),1);if(editingId===item.id)resetWorkspace();renderConnections();say(item.name+' connection removed')}
-      if(event.target.classList.contains('edit')){editingId=item.id;nameInput.value=item.name;accountNameInput.value=item.accountName;sourceInput.value=item.source;monitorNew.checked=item.monitorNew;importHistory.checked=item.importHistory;document.getElementById('historyOptions').hidden=!item.importHistory;const builtIn=[...soundChoice.options].some(option=>option.value===item.sound);if(builtIn)soundChoice.value=item.sound;updateName();updateAccountName();document.getElementById('sourcePreview').hidden=false;document.getElementById('sourceText').textContent=item.source;startBtn.textContent='Save connection changes';document.getElementById('launchNote').textContent='Editing '+item.name;document.querySelector('.grid').scrollIntoView({behavior:'smooth'});say('Editing '+item.name+' — other connections keep running')}
+    async function loadProjects(){
+      const response=await fetch('/api/automation/projects');if(response.status===401)return;if(!response.ok)return;
+      const data=await response.json();connections=data.projects.map(project=>({id:project.id,name:project.streamer_name,accountName:project.page_name,source:project.source_url,monitorNew:project.monitor_new,importHistory:project.import_history,active:project.status==='active',platforms:project.destinations.length,sound:project.sound_choice,queue:project.queue,events:project.events}));renderConnections();
+    }
+    startBtn.addEventListener('click',async()=>{
+      const source=sourceInput.value.trim(),streamer=nameInput.value.trim(),page=accountNameInput.value.trim();
+      if(!source){say('Paste the streamer link first');sourceInput.focus();return}if(!streamer||!page){say('Enter the streamer and page names');return}
+      const supported=['facebook','instagram','youtube','tiktok'];const destinations=[];
+      document.querySelectorAll('.dest[data-platform]').forEach(card=>{const link=card.querySelector('[name="account_link"]');if(supported.includes(card.dataset.platform)&&card.dataset.authorized==='true'&&link&&link.value.trim())destinations.push({platform:card.dataset.platform,account_link:link.value.trim()})});
+      if(!destinations.length){say('Save at least one Facebook, Instagram, YouTube or TikTok destination');return}
+      startBtn.disabled=true;startBtn.textContent='Creating automation…';
+      const lengthText=document.getElementById('length').value;const clipLength=lengthText.startsWith('Short')?25:lengthText.startsWith('Long')?60:40;
+      try{const response=await fetch('/api/automation/projects',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({source_url:source,streamer_name:streamer,page_name:page,monitor_new:monitorNew.checked,import_history:importHistory.checked,clip_count:3,clip_length:clipLength,sound_choice:soundChoice.value,destinations})});if(response.status===401){window.location.href='/login';return}const result=await response.json();if(!response.ok)throw new Error(result.detail||'Could not create automation');say('Automation connection created');document.getElementById('launchNote').textContent='Connection saved on the server';await loadProjects();resetWorkspace()}catch(error){say(error.message);document.getElementById('launchNote').textContent=error.message}finally{startBtn.disabled=false;startBtn.textContent='Start clipping 24/7'}
     });
-    renderConnections();
+    document.getElementById('connectionsList').addEventListener('click',async event=>{
+      const row=event.target.closest('.connection-row');if(!row)return;const item=connections.find(entry=>entry.id===row.dataset.id);if(!item)return;
+      if(event.target.classList.contains('pause')){const response=await fetch('/api/automation/projects/'+item.id,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({status:item.active?'paused':'active'})});if(response.ok){say(item.name+(item.active?' paused':' resumed'));await loadProjects()}else say('Could not change this connection')}
+      if(event.target.classList.contains('delete')){if(!confirm('Delete this clipping connection?'))return;const response=await fetch('/api/automation/projects/'+item.id,{method:'DELETE'});if(response.ok){say(item.name+' connection removed');await loadProjects()}else say('Could not delete this connection')}
+      if(event.target.classList.contains('ingest')){const picker=document.createElement('input');picker.type='file';picker.accept='video/*';picker.onchange=async()=>{if(!picker.files[0])return;event.target.disabled=true;event.target.textContent='Uploading…';const data=new FormData();data.append('video',picker.files[0]);const response=await fetch('/api/automation/projects/'+item.id+'/ingest',{method:'POST',body:data});const result=await response.json();if(response.ok){say('Video queued — clips will publish automatically');setTimeout(loadProjects,2500)}else say(result.detail||'Upload failed');event.target.disabled=false;event.target.textContent='Add test video'};picker.click()}
+    });
+    loadProjects();setInterval(loadProjects,15000);
   </script>
 </body>
 </html>

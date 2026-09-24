@@ -29,9 +29,8 @@ MAX_UPLOAD_BYTES = int(os.environ.get("CLIPMAGIC_MAX_UPLOAD_MB", "250")) * 1024 
 JOB_TTL_SECONDS = int(os.environ.get("CLIPMAGIC_JOB_TTL_SECONDS", "3600"))
 FONT_PATH = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"
 OWNER_EMAIL = os.environ.get("CLIPMAGIC_OWNER_EMAIL", "Ebubedikellc@gmail.com").strip().lower()
-OWNER_PASSWORD = os.environ.get("CLIPMAGIC_OWNER_PASSWORD", "")
 SESSION_SECRET = os.environ.get("CLIPMAGIC_SESSION_SECRET") or hashlib.sha256(
-    f"clipmagic-session|{OWNER_PASSWORD}".encode()
+    f"clipmagic-session|{OWNER_EMAIL}|owner-only".encode()
 ).hexdigest()
 SESSION_COOKIE = "clipmagic_owner_session"
 CUSTOMER_COOKIE = "clipmagic_customer_session"
@@ -733,19 +732,14 @@ def login_page(message: str = "") -> HTMLResponse:
 async def owner_login_page(request: Request):
     if valid_owner_session(request):
         return RedirectResponse("/control-panel.html", status_code=303)
-    configured = bool(OWNER_PASSWORD)
-    return login_page("Owner password is not configured yet." if not configured else "")
+    return login_page()
 
 
 @app.post("/owner-login")
-async def owner_login(email: str = Form(...), password: str = Form(...)):
-    configured = bool(OWNER_PASSWORD)
-    if not configured:
-        return login_page("Owner password is not configured yet.")
+async def owner_login(email: str = Form(...)):
     email_ok = hmac.compare_digest(email.strip().lower(), OWNER_EMAIL)
-    password_ok = hmac.compare_digest(password, OWNER_PASSWORD)
-    if not (email_ok and password_ok):
-        return login_page("The email or password is incorrect.")
+    if not email_ok:
+        return login_page("This email is not the registered owner email.")
     response = RedirectResponse("/control-panel.html", status_code=303)
     response.set_cookie(
         SESSION_COOKIE,

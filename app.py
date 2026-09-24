@@ -102,6 +102,11 @@ def initialize_database() -> None:
                 PRIMARY KEY (user_id, platform),
                 FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
             );
+            CREATE TABLE IF NOT EXISTS owner_app_credentials (
+                platform TEXT PRIMARY KEY,
+                encrypted_data TEXT NOT NULL,
+                updated_at INTEGER NOT NULL
+            );
             CREATE TABLE IF NOT EXISTS automation_projects (
                 id TEXT PRIMARY KEY,
                 user_id INTEGER NOT NULL,
@@ -180,7 +185,32 @@ def oauth_environment(platform: str) -> tuple[str, str]:
     prefix = {"facebook": "META", "instagram": "META", "youtube": "GOOGLE", "tiktok": "TIKTOK"}[platform]
     client_id = os.environ.get(f"{prefix}_CLIENT_ID", "").strip()
     client_secret = os.environ.get(f"{prefix}_CLIENT_SECRET", "").strip()
+    if client_id and client_secret:
+        return client_id, client_secret
+    stored_platform = "meta" if platform in {"facebook", "instagram"} else platform
+    try:
+        with database() as connection:
+            row = connection.execute(
+                "SELECT encrypted_data FROM owner_app_credentials WHERE platform=?", (stored_platform,)
+            ).fetchone()
+        if row:
+            values = json.loads(API_CIPHER.decrypt(row["encrypted_data"].encode()).decode())
+            client_id = str(values.get("client_id", "")).strip()
+            client_secret = str(values.get("client_secret", "")).strip()
+    except Exception:
+        return "", ""
     return client_id, client_secret
+
+
+def save_owner_app_credentials(platform: str, client_id: str, client_secret: str) -> None:
+    values = {"client_id": client_id.strip(), "client_secret": client_secret.strip()}
+    encrypted = API_CIPHER.encrypt(json.dumps(values).encode()).decode()
+    with database() as connection:
+        connection.execute(
+            "INSERT INTO owner_app_credentials (platform, encrypted_data, updated_at) VALUES (?, ?, ?) "
+            "ON CONFLICT(platform) DO UPDATE SET encrypted_data=excluded.encrypted_data, updated_at=excluded.updated_at",
+            (platform, encrypted, int(time.time())),
+        )
 
 
 def oauth_state(user_id: int, platform: str) -> str:
@@ -873,6 +903,47 @@ async def owner_control_panel(request: Request):
     if not valid_owner_session(request):
         return RedirectResponse("/owner-login", status_code=303)
     return FileResponse(BASE_DIR / "control-panel.html")
+
+
+@app.get("/api/owner/platform-apps")
+async def owner_platform_apps(request: Request):
+    if not valid_owner_session(request):
+        raise HTTPException(401, "Owner login required")
+    result = {}
+    for platform in ("meta", "youtube", "tiktok"):
+        check_platform = "facebook" if platform == "meta" else platform
+        client_id, client_secret = oauth_environment(check_platform)
+        callbacks = (
+            [f"{public_base_url()}/api/oauth/facebook/callback", f"{public_base_url()}/api/oauth/instagram/callback"]
+            if platform == "meta"
+            else [f"{public_base_url()}/api/oauth/{platform}/callback"]
+        )
+        result[platform] = {
+            "configured": bool(client_id and client_secret),
+            "client_id_hint": f"...{client_id[-6:]}" if len(client_id) > 6 else (client_id or ""),
+            "callbacks": callbacks,
+        }
+    return {"platforms": result}
+
+
+@app.post("/api/owner/platform-apps/{platform}")
+async def update_owner_platform_app(platform: str, request: Request):
+    if not valid_owner_session(request):
+        raise HTTPException(401, "Owner login required")
+    if platform not in {"meta", "youtube", "tiktok"}:
+        raise HTTPException(404, "Platform not supported")
+    try:
+        body = await request.json()
+    except Exception as exc:
+        raise HTTPException(400, "Invalid request") from exc
+    client_id = str(body.get("client_id", "")).strip()
+    client_secret = str(body.get("client_secret", "")).strip()
+    if not client_id or not client_secret:
+        raise HTTPException(400, "Enter both the App ID and App Secret")
+    if len(client_id) > 500 or len(client_secret) > 2000:
+        raise HTTPException(400, "Credential is too long")
+    save_owner_app_credentials(platform, client_id, client_secret)
+    return {"saved": True, "platform": platform}
 
 
 def customer_page(filename: str, message: str = "") -> HTMLResponse:

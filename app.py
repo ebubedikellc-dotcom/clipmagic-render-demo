@@ -179,7 +179,7 @@ def initialize_database() -> None:
             )
 
 
-SUPPORTED_DESTINATIONS = {"facebook", "instagram", "youtube", "tiktok", "x", "snapchat", "dailymotion"}
+SUPPORTED_DESTINATIONS = {"facebook", "instagram", "youtube", "tiktok", "x", "snapchat"}
 OAUTH_DESTINATIONS = {"facebook", "instagram", "youtube", "tiktok", "x", "snapchat"}
 
 
@@ -315,25 +315,6 @@ def active_credentials(user_id: int, platform: str) -> dict:
     """Refresh expiring OAuth tokens before an automatic post."""
     credentials = credentials_for(user_id, platform)
     expires_at = int(credentials.get("expires_at") or 0)
-    if platform == "dailymotion":
-        if credentials.get("access_token") and expires_at > int(time.time()) + 300:
-            return credentials
-        if not credentials.get("client_id") or not credentials.get("client_secret"):
-            return credentials
-        try:
-            response = httpx.post(
-                "https://oauth2.dailymotion.com/v2/token",
-                data={"grant_type": "client_credentials", "client_id": credentials["client_id"],
-                      "client_secret": credentials["client_secret"], "scope": "video.manage"}, timeout=30,
-            )
-            response.raise_for_status()
-            refreshed = response.json()
-            credentials["access_token"] = refreshed["access_token"]
-            credentials["expires_at"] = int(time.time()) + int(refreshed.get("expires_in", 3600))
-            save_credentials(user_id, platform, credentials)
-        except Exception:
-            pass
-        return credentials
     if not credentials.get("refresh_token") or expires_at > int(time.time()) + 300:
         return credentials
     client_id, client_secret = oauth_environment(platform)
@@ -909,35 +890,9 @@ def publish_snapchat(path: Path, title: str, hashtags: str, credentials: dict) -
     return str(post.json().get("spotlight_id") or media_id)
 
 
-def publish_dailymotion(path: Path, title: str, hashtags: str, credentials: dict) -> str:
-    token, profile_id = credentials.get("access_token"), credentials.get("profile_id")
-    if not token or not profile_id:
-        raise RuntimeError("Save and verify the Dailymotion profile credentials before automatic posting")
-    headers = {"Authorization": f"Bearer {token}"}
-    session = httpx.post("https://api.dailymotion.com/v2/files/upload_sessions", headers=headers, timeout=60)
-    session.raise_for_status()
-    session_data = session.json()
-    upload_url = session_data.get("upload_url") or (session_data.get("data") or {}).get("upload_url")
-    if not upload_url:
-        raise RuntimeError("Dailymotion did not provide an upload address")
-    with path.open("rb") as video:
-        upload = httpx.post(upload_url, headers=headers, files={"file": (path.name, video, "video/mp4")}, timeout=300)
-    upload.raise_for_status()
-    uploaded = upload.json()
-    file_url = uploaded.get("url") or uploaded.get("file_url") or (uploaded.get("data") or {}).get("url")
-    if not file_url:
-        raise RuntimeError("Dailymotion did not return the uploaded file URL")
-    create = httpx.post(
-        f"https://api.dailymotion.com/v2/profiles/{profile_id}/videos", headers=headers,
-        json={"title": title[:255], "description": hashtags, "category": "people",
-              "visibility": "public", "is_for_kids": False, "source": {"file_url": file_url}}, timeout=60,
-    )
-    create.raise_for_status()
-    result = create.json()
-    return str(result.get("video_id") or result.get("id") or (result.get("data") or {}).get("id") or "uploaded")
-
-
 def publish_one(row: sqlite3.Row) -> str:
+    if row["platform"] not in SUPPORTED_DESTINATIONS:
+        raise PermissionError("This posting destination has been removed")
     path = WORK_ROOT / row["job_id"] / row["filename"]
     if not path.is_file():
         raise RuntimeError("The temporary clip expired before it could be posted")
@@ -956,8 +911,6 @@ def publish_one(row: sqlite3.Row) -> str:
         return publish_x(path, row["title"], row["hashtags"], credentials)
     if row["platform"] == "snapchat":
         return publish_snapchat(path, row["title"], row["hashtags"], credentials)
-    if row["platform"] == "dailymotion":
-        return publish_dailymotion(path, row["title"], row["hashtags"], credentials)
     raise PermissionError("Automatic posting is not available for this platform yet")
 
 
@@ -1398,7 +1351,7 @@ async def save_customer_apis(request: Request):
     if not customer:
         raise HTTPException(401, "Please log in")
     payload = await request.json()
-    allowed = {"facebook", "instagram", "youtube", "tiktok", "snapchat", "x", "rumble", "dailymotion", "ai"}
+    allowed = {"facebook", "instagram", "youtube", "tiktok", "snapchat", "x", "ai"}
     saved = []
     with database() as connection:
         for platform, values in payload.items():
@@ -1407,22 +1360,6 @@ async def save_customer_apis(request: Request):
             clean = {str(key)[:40]: str(value).strip()[:4000] for key, value in values.items() if str(value).strip()}
             if not clean:
                 continue
-            if platform == "dailymotion" and (clean.get("client_id") or clean.get("client_secret")):
-                if not all(clean.get(key) for key in ("client_id", "client_secret", "profile_id")):
-                    raise HTTPException(400, "Enter the Dailymotion profile ID, API key and API secret")
-                try:
-                    token_response = httpx.post(
-                        "https://oauth2.dailymotion.com/v2/token",
-                        data={"grant_type": "client_credentials", "client_id": clean["client_id"],
-                              "client_secret": clean["client_secret"], "scope": "video.manage"}, timeout=30,
-                    )
-                    token_response.raise_for_status()
-                    token_data = token_response.json()
-                    clean["access_token"] = token_data["access_token"]
-                    clean["expires_at"] = str(int(time.time()) + int(token_data.get("expires_in", 3600)))
-                    clean["connected_at"] = str(int(time.time()))
-                except Exception as exc:
-                    raise HTTPException(400, "Dailymotion could not verify those API details") from exc
             existing = connection.execute(
                 "SELECT encrypted_data FROM api_credentials WHERE user_id = ? AND platform = ?",
                 (customer["id"], platform),

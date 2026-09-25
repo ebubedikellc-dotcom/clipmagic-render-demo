@@ -8,17 +8,15 @@ This repository contains a Render-ready clipping and publishing service.
 - FFmpeg clipping, scene-change selection, vertical formatting and page-name/FOLLOW branding.
 - Optional speech-based title generation when `OPENAI_API_KEY` is configured.
 - A persistent publishing queue with retries, delivery status and automatic file cleanup.
-- Facebook Page, Instagram Reels, YouTube, TikTok, X, Snapchat Spotlight and Dailymotion posting adapters.
+- Facebook Page, Instagram Reels, YouTube, TikTok, X and Snapchat Spotlight posting adapters.
 - Official one-tap Meta, Google/YouTube, TikTok, X and Snapchat OAuth connection flows.
 - Automatic OAuth token renewal for YouTube, TikTok, X and Snapchat.
-- Rumble export remains manual because Rumble does not publish an official VOD-upload API.
 - Pause, resume, delete, manual test upload and a secure automatic source-video inbox for every project.
 
 ## One-time owner configuration
 
 Register ClipMagic as a developer app with Meta, Google, TikTok, X and Snapchat, then enter the
-credentials in the owner control panel (or set the corresponding environment variables). Dailymotion
-uses each customer's private API key, API secret and profile ID on the main site. The supported
+credentials in the owner control panel (or set the corresponding environment variables). The supported
 environment variables include
 `META_CLIENT_ID`, `META_CLIENT_SECRET`, `GOOGLE_CLIENT_ID`,
 `GOOGLE_CLIENT_SECRET`, `TIKTOK_CLIENT_ID` and `TIKTOK_CLIENT_SECRET`

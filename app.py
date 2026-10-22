@@ -14,6 +14,8 @@ import subprocess
 import threading
 import time
 import uuid
+import sys
+import combined
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
@@ -167,6 +169,8 @@ def initialize_database() -> None:
             """
         )
         project_columns = {row[1] for row in connection.execute("PRAGMA table_info(automation_projects)").fetchall()}
+        if "combined_config" not in project_columns:
+            connection.execute("ALTER TABLE automation_projects ADD COLUMN combined_config TEXT")
         if "source_secret" not in project_columns:
             connection.execute("ALTER TABLE automation_projects ADD COLUMN source_secret TEXT")
         missing_secrets = connection.execute(
@@ -578,7 +582,13 @@ def remove_fully_published_job(job_id: str) -> None:
 
 def process_job(job_id: str, input_path: Path, page_name: str, streamer_name: str,
                 clip_count: int, clip_length: int, user_id: int | None = None,
-                project_id: str | None = None) -> None:
+                project_id: str | None = None, source_caption: str = "") -> None:
+    if project_id:
+        with database() as connection:
+            project = connection.execute("SELECT combined_config FROM automation_projects WHERE id=? AND user_id=?", (project_id, user_id)).fetchone()
+        if project and project["combined_config"]:
+            combined.render(sys.modules[__name__], job_id, input_path, user_id, json.loads(project["combined_config"]), page_name, clip_length, source_caption, project_id)
+            return
     job_dir = input_path.parent
     try:
         update_job(job_id, status="queued", progress=2, message="Waiting for the video processor")
@@ -754,7 +764,7 @@ def publish_youtube(path: Path, title: str, hashtags: str, credentials: dict) ->
     if not token:
         raise RuntimeError("Connect YouTube before automatic posting")
     metadata = {
-        "snippet": {"title": title[:100], "description": hashtags, "categoryId": "22"},
+        "snippet": {"title": title[:100], "description": f"{title}\n\n{hashtags}".strip(), "categoryId": "22"},
         "status": {"privacyStatus": credentials.get("privacy_status", "public"), "selfDeclaredMadeForKids": False},
     }
     with path.open("rb") as video:
@@ -973,6 +983,7 @@ async def health() -> dict:
     return {
         "status": "ok",
         "engine": "ffmpeg",
+        "combined_video": True,
         "automation_queue": True,
         "automatic_cleanup": True,
         "temporary_storage": True,
@@ -1441,6 +1452,11 @@ async def create_project(request: Request):
     page_name = str(payload.get("page_name", "")).strip()[:70]
     if not streamer_name or not page_name:
         raise HTTPException(400, "Enter the streamer name and your page name")
+    combined_config = None
+    if payload.get("mode") == "combined":
+        if not isinstance(payload.get("combined"), dict):
+            raise HTTPException(400, "Choose your lower video and combined settings")
+        combined_config = combined.settings(sys.modules[__name__], customer["id"], payload["combined"])
     requested = payload.get("destinations") or []
     if not isinstance(requested, list):
         raise HTTPException(400, "Choose at least one destination")
@@ -1475,6 +1491,8 @@ async def create_project(request: Request):
              bool(payload.get("import_history", False)), clip_count, clip_length,
              str(payload.get("sound_choice", "No added sound"))[:100], "active", now, now, secrets.token_urlsafe(24)),
         )
+        if combined_config:
+            connection.execute("UPDATE automation_projects SET combined_config=? WHERE id=?", (json.dumps(combined_config), project_id))
         for platform, link in destinations:
             connection.execute(
                 "INSERT INTO project_destinations (project_id,platform,account_link,enabled) VALUES (?,?,?,1)",
@@ -1555,7 +1573,7 @@ async def store_upload(video: UploadFile, job_id: str) -> Path:
 
 @app.post("/api/automation/projects/{project_id}/ingest")
 async def ingest_project_video(project_id: str, background_tasks: BackgroundTasks, request: Request,
-                               video: UploadFile = File(...)):
+                               video: UploadFile = File(...), source_caption: str = Form("")):
     customer = current_customer(request)
     if not customer:
         raise HTTPException(401, "Please log in")
@@ -1574,13 +1592,13 @@ async def ingest_project_video(project_id: str, background_tasks: BackgroundTask
     save_job_state(job_id)
     add_event(project_id, "A new authorized source video entered the clip queue")
     background_tasks.add_task(process_job, job_id, input_path, project["page_name"], project["streamer_name"],
-                              project["clip_count"], project["clip_length"], customer["id"], project_id)
+                              project["clip_count"], project["clip_length"], customer["id"], project_id, source_caption)
     return JSONResponse(jobs[job_id], status_code=202)
 
 
 @app.post("/api/source-inbox/{project_id}/{source_secret}")
 async def automatic_source_inbox(project_id: str, source_secret: str, background_tasks: BackgroundTasks,
-                                  video: UploadFile = File(...)):
+                                  video: UploadFile = File(...), source_caption: str = Form("")):
     """Secure machine-to-machine intake used by an authorized source connector or webhook."""
     with database() as connection:
         project = connection.execute(
@@ -1597,7 +1615,7 @@ async def automatic_source_inbox(project_id: str, source_secret: str, background
     save_job_state(job_id)
     add_event(project_id, "A new source video was received automatically", "success")
     background_tasks.add_task(process_job, job_id, input_path, project["page_name"], project["streamer_name"],
-                              project["clip_count"], project["clip_length"], project["user_id"], project_id)
+                              project["clip_count"], project["clip_length"], project["user_id"], project_id, source_caption)
     return JSONResponse({"accepted": True, "job_id": job_id}, status_code=202)
 
 
@@ -1653,10 +1671,14 @@ async def create_job(
 
 
 @app.get("/api/jobs/{job_id}")
-async def get_job(job_id: str) -> dict:
+async def get_job(job_id: str, request: Request) -> dict:
     job = jobs.get(job_id) or load_job_state(job_id)
     if not job:
         raise HTTPException(404, "Job not found or its temporary files have been deleted")
+    if job.get("mode") == "combined":
+        user = current_customer(request)
+        if not user or user["id"] != job.get("user_id"):
+            raise HTTPException(404, "Job not found")
     return job
 
 
@@ -1671,10 +1693,19 @@ async def get_file(job_id: str, filename: str) -> FileResponse:
 
 
 @app.delete("/api/jobs/{job_id}")
-async def delete_job(job_id: str) -> dict:
+async def delete_job(job_id: str, request: Request) -> dict:
+    job = jobs.get(job_id) or load_job_state(job_id)
+    if job and job.get("mode") == "combined":
+        user = current_customer(request)
+        if not user or user["id"] != job.get("user_id"):
+            raise HTTPException(404, "Job not found")
+        if job["status"] in {"queued", "processing"}:
+            raise HTTPException(409, "Wait until processing finishes before deleting")
     jobs.pop(job_id, None)
     shutil.rmtree(WORK_ROOT / job_id, ignore_errors=True)
     return {"deleted": True}
 
+
+combined.install(sys.modules[__name__])
 
 app.mount("/", StaticFiles(directory=BASE_DIR, html=True), name="site")

@@ -82,6 +82,7 @@
       <div class="header-right"><a class="account-link" href="/login">Log in</a><a class="account-link primary" href="/register">Register</a><div class="fuel-badge" id="fuelHeader">⛽ 7,200 fuel</div><div class="status"><i class="dot" id="topDot"></i><span class="status-copy" id="topStatus">Ready to connect</span></div></div>
     </header>
 
+    <nav style="display:flex;gap:12px;margin:20px 0" aria-label="ClipMagic modes"><a class="account-link primary" href="/" aria-current="page">Normal clipping</a><a class="account-link" href="/combined.html">Combined videos</a></nav>
     <section class="topline">
       <div><p class="eyebrow">Working video clipping engine</p><h1>One stream. Every winning moment.</h1><p class="sub">Upload a video now and the server will create real vertical, branded clips that you can play and download.</p></div>
       <div class="mini-stats"><div class="mini"><b id="clipCount">0</b><small>Clips today</small></div><div class="mini"><b id="postCount">0</b><small>Posted</small></div></div>
@@ -305,7 +306,7 @@
     document.getElementById('newConnectionBtn').addEventListener('click',()=>{if(connections.length>=7){say('You already have 7 clipping connections');return}resetWorkspace();document.querySelector('.grid').scrollIntoView({behavior:'smooth'});say('Fresh connection ready — your other clippers keep running')});
     async function loadProjects(){
       const response=await fetch('/api/automation/projects');if(response.status===401)return;if(!response.ok)return;
-      const data=await response.json();connections=data.projects.map(project=>({id:project.id,name:project.streamer_name,accountName:project.page_name,source:project.source_url,monitorNew:project.monitor_new,importHistory:project.import_history,active:project.status==='active',platforms:project.destinations.length,sound:project.sound_choice,queue:project.queue,events:project.events,automaticInbox:project.automatic_inbox}));renderConnections();
+      const data=await response.json();connections=data.projects.filter(project=>!project.combined_config).map(project=>({id:project.id,name:project.streamer_name,accountName:project.page_name,source:project.source_url,monitorNew:project.monitor_new,importHistory:project.import_history,active:project.status==='active',platforms:project.destinations.length,sound:project.sound_choice,queue:project.queue,events:project.events,automaticInbox:project.automatic_inbox}));renderConnections();
     }
     startBtn.addEventListener('click',async()=>{
       const source=sourceInput.value.trim(),streamer=nameInput.value.trim(),page=accountNameInput.value.trim();

@@ -187,9 +187,10 @@
         </section>
       </aside>
     </div>
-    <p class="demo-note">Video upload, cutting, branding, downloads and temporary cleanup are real. Social account connection and 24/7 source monitoring require official platform authorization.</p>
+    <p class="demo-note">Video upload, cutting, branding, downloads and temporary cleanup are real. Posting needs connected social accounts. Automatic collection also needs a source connector; saving a source link does not fetch its posts.</p>
   </main>
   <div class="toast" id="toast" role="status" aria-live="polite"></div>
+  <script src="/job-client.js?v=2"></script>
   <script>
     const toast=document.getElementById('toast');
     function say(message){toast.textContent=message;toast.classList.add('show');clearTimeout(window.toastTimer);window.toastTimer=setTimeout(()=>toast.classList.remove('show'),2400)}
@@ -204,32 +205,55 @@
     let enginePoll=null;
     let currentJobId=null;
     function showEngine(title,message,progress){engineState.querySelector('strong').textContent=title;engineState.querySelector('span').textContent=message;engineProgress.style.width=String(progress||0)+'%'}
-    async function pollJob(jobId){
-      clearTimeout(enginePoll);
-      try{
-        const response=await fetch('/api/jobs/'+jobId);const job=await response.json();if(!response.ok)throw new Error(job.detail||'Job unavailable');
-        showEngine(job.status==='completed'?'Clips ready':job.status==='failed'?'Processing failed':'Working on your video',job.message,job.progress);
-        if(job.status==='completed'){
-          document.getElementById('clipCount').textContent=String(job.outputs.length);
-          reviewEmpty.hidden=true;reviewCount.textContent=job.outputs.length+' ready';
-          clipResults.innerHTML=job.outputs.map(item=>'<article class="clip-result"><video controls playsinline preload="metadata" src="'+item.url+'"></video><span class="clip-meta">'+item.seconds+' seconds · Ready to review</span><div class="post-suggestion"><small>Title to use when posting</small><strong>'+item.post_title+'</strong><span class="post-tags">'+item.hashtags+'</span></div><a href="'+item.url+'" download>⬇ Download to phone</a></article>').join('');
-          deleteClips.hidden=false;
-          document.getElementById('reviewArea').scrollIntoView({behavior:'smooth',block:'start'});
-          document.getElementById('processBtn').disabled=false;document.getElementById('processBtn').textContent='Create real clips';return;
+    const jobKey='clipmagic.normal.job';let stopEnginePoll=null;
+    const recheck=document.createElement('button');recheck.type='button';recheck.className='account-link';recheck.textContent='Check again';recheck.hidden=true;engineState.after(recheck);
+    recheck.onclick=()=>{if(currentJobId)pollJob(currentJobId)};
+    function renderClips(outputs){
+      clipResults.replaceChildren();
+      for(const item of outputs){
+        const article=document.createElement('article');article.className='clip-result';
+        const video=document.createElement('video');video.controls=true;video.playsInline=true;video.preload='metadata';video.src=item.url;
+        const meta=document.createElement('span');meta.className='clip-meta';meta.textContent=item.seconds+' seconds · Ready to review';
+        const caption=document.createElement('div');caption.className='post-suggestion';
+        const label=document.createElement('small');label.textContent='Title to use when posting';
+        const title=document.createElement('strong');title.textContent=item.post_title;
+        const tags=document.createElement('span');tags.className='post-tags';tags.textContent=item.hashtags;
+        caption.append(label,title,tags);
+        const link=document.createElement('a');link.href=item.url;link.download=item.name;link.textContent='⬇ Download to phone';
+        article.append(video,meta,caption,link);clipResults.append(article);
+      }
+    }
+    function pollJob(jobId){
+      if(stopEnginePoll)stopEnginePoll();recheck.hidden=true;currentJobId=jobId;
+      const button=document.getElementById('processBtn');button.disabled=true;button.textContent='Checking your video…';
+      stopEnginePoll=ClipJobs.watch(jobId,{
+        updated(job){
+          showEngine(job.status==='completed'?'Clips ready':job.status==='failed'?'Processing failed':'Working on your video',job.message,job.progress);
+          if(job.status==='completed'){
+            document.getElementById('clipCount').textContent=String(job.outputs.length);reviewEmpty.hidden=true;reviewCount.textContent=job.outputs.length+' ready';renderClips(job.outputs);deleteClips.hidden=false;button.disabled=false;button.textContent='Create real clips';
+          }else if(job.status==='failed'){
+            reviewCount.textContent='Failed';reviewEmpty.hidden=false;reviewEmpty.textContent=job.message;button.disabled=false;button.textContent='Try another video';ClipJobs.remember(jobKey,null);
+          }
+        },
+        retrying(message){showEngine('Reconnecting',message,0);reviewCount.textContent='Reconnecting…'},
+        stopped(error){
+          showEngine('Could not check video',error.status===404?'This video is no longer available. It may have expired or been removed during a server replacement.':error.message,0);
+          reviewCount.textContent='Check needed';reviewEmpty.hidden=false;reviewEmpty.textContent=engineState.querySelector('span').textContent;button.disabled=false;button.textContent='Create real clips';
+          recheck.hidden=error.status===404||error.status===401;
+          if(error.status===404)ClipJobs.remember(jobKey,null);
         }
-        if(job.status==='failed'){reviewCount.textContent='Failed';reviewEmpty.hidden=false;reviewEmpty.textContent=job.message;document.getElementById('processBtn').disabled=false;document.getElementById('processBtn').textContent='Try another video';return}
-        enginePoll=setTimeout(()=>pollJob(jobId),1500);
-      }catch(error){showEngine('Processing was interrupted','The free server restarted. Please press Try again—the safer processor is now enabled.',100);reviewCount.textContent='Try again';reviewEmpty.hidden=false;reviewEmpty.textContent='Your unfinished temporary job is gone. Choose the video again and retry.';const button=document.getElementById('processBtn');button.disabled=false;button.textContent='Try again'}
+      });
     }
     engineForm.addEventListener('submit',async event=>{
-      event.preventDefault();const button=document.getElementById('processBtn');button.disabled=true;button.textContent='Uploading video…';clipResults.innerHTML='';reviewEmpty.hidden=false;reviewEmpty.innerHTML='Your video is being processed. The finished clips will appear here automatically.';reviewCount.textContent='Working…';showEngine('Uploading','Keep this page open while the video uploads.',2);
-      try{const response=await fetch('/api/jobs',{method:'POST',body:new FormData(engineForm)});const job=await response.json();if(!response.ok)throw new Error(job.detail||'Upload failed');currentJobId=job.id;deleteClips.hidden=true;button.textContent='Processing video…';pollJob(job.id)}catch(error){showEngine('Upload failed',error.message,100);reviewCount.textContent='Try again';button.disabled=false;button.textContent='Try again'}
+      event.preventDefault();if(stopEnginePoll)stopEnginePoll();recheck.hidden=true;const button=document.getElementById('processBtn');button.disabled=true;button.textContent='Uploading video…';clipResults.innerHTML='';reviewEmpty.hidden=false;reviewEmpty.innerHTML='Your video is being processed. The finished clips will appear here automatically.';reviewCount.textContent='Working…';showEngine('Uploading','Keep this page open while the video uploads.',2);
+      try{const response=await fetch('/api/jobs',{method:'POST',body:new FormData(engineForm)});const job=await response.json();if(!response.ok)throw new Error(job.detail||'Upload failed');currentJobId=job.id;ClipJobs.remember(jobKey,job.id);deleteClips.hidden=true;button.textContent='Processing video…';pollJob(job.id)}catch(error){showEngine('Upload failed',error.message,100);reviewCount.textContent='Try again';button.disabled=false;button.textContent='Try again'}
     });
     deleteClips.addEventListener('click',async()=>{
       if(!currentJobId)return;
       deleteClips.disabled=true;deleteClips.textContent='Deleting…';
-      try{await fetch('/api/jobs/'+currentJobId,{method:'DELETE'});clearTimeout(enginePoll);currentJobId=null;clipResults.innerHTML='';reviewEmpty.hidden=false;reviewEmpty.innerHTML='The finished clips were deleted from the server. You can upload another video now.';reviewCount.textContent='Deleted';deleteClips.hidden=true;showEngine('Storage cleared','Your temporary upload and finished clips have been removed.',0);say('Finished clips deleted from the server')}catch(error){say('Could not delete the clips. They will still delete automatically after one hour')}finally{deleteClips.disabled=false;deleteClips.textContent='Delete finished clips'}
+      try{const response=await fetch('/api/jobs/'+currentJobId,{method:'DELETE'});if(!response.ok)throw Error('Deletion failed');if(stopEnginePoll)stopEnginePoll();ClipJobs.remember(jobKey,null);recheck.hidden=true;currentJobId=null;clipResults.innerHTML='';reviewEmpty.hidden=false;reviewEmpty.innerHTML='The finished clips were deleted from the server. You can upload another video now.';reviewCount.textContent='Deleted';deleteClips.hidden=true;showEngine('Storage cleared','Your temporary upload and finished clips have been removed.',0);say('Finished clips deleted from the server')}catch(error){say('Could not delete the clips. They will still delete automatically after one hour')}finally{deleteClips.disabled=false;deleteClips.textContent='Delete finished clips'}
     });
+    const restoredJob=ClipJobs.recalled(jobKey);if(restoredJob&&/^[a-f0-9]{32}$/.test(restoredJob))pollJob(restoredJob);
     const defaultBilling={enabled:true,balance:7200,packages:[{name:'Starter',fuel:5000,price:5000},{name:'Creator',fuel:12000,price:10000},{name:'Pro',fuel:30000,price:20000}],payments:{card:true,transfer:true,cash:true},bank:{bank:'Demo Bank',account:'0123456789',name:'ClipMagic Media'}};
     function getBilling(){try{return {...defaultBilling,...JSON.parse(localStorage.getItem('clipmagicBilling')||'{}')}}catch{return defaultBilling}}
     function money(value){return '₦'+Number(value).toLocaleString()}

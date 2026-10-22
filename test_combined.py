@@ -106,4 +106,50 @@ class CombinedTests(unittest.TestCase):
             r=self.client.post('/api/jobs',files={'video':('top.mp4',self.top.read_bytes(),'video/mp4')},data={'clip_count':1,'clip_length':3})
             self.assertEqual(r.status_code,202,r.text);process.assert_called_once()
 
+    def test_normal_branding_with_punctuation_and_download(self):
+        with patch.object(service,'generate_post_title',return_value=('A test caption','test')):
+            r=self.client.post('/api/jobs',files={'video':('top.mp4',self.top.read_bytes(),'video/mp4')},
+                data={'page_name':"Frank's Clips: 100%",'clip_count':1,'clip_length':3})
+        job=self.client.get('/api/jobs/'+r.json()['id']).json()
+        self.assertEqual(job['status'],'completed',job)
+        download=self.client.get(job['outputs'][0]['url'])
+        self.assertEqual(download.status_code,200)
+        self.assertTrue(download.headers['content-disposition'].startswith('inline'))
+        self.assertGreater(len(download.content),1000)
+
+    def test_restart_ends_interrupted_job_but_keeps_completed(self):
+        import uuid
+        for status in ['processing','queued','completed']:
+            job_id=uuid.uuid4().hex
+            service.jobs[job_id]={'id':job_id,'status':status}
+            service.save_job_state(job_id)
+            service.jobs.pop(job_id)
+            service.recover_interrupted_jobs()
+            self.assertEqual(service.jobs[job_id]['status'],'completed' if status=='completed' else 'failed')
+
+    def test_login_returns_to_combined_without_external_redirect(self):
+        client=TestClient(service.app,base_url='https://testserver')
+        page=client.get('/login?next=/combined.html')
+        self.assertIn('value="/combined.html"',page.text)
+        r=client.post('/login',data={'email':service.OWNER_EMAIL,'next':'/combined.html'},follow_redirects=False)
+        self.assertEqual(r.headers['location'],'/combined.html')
+        self.assertEqual(client.get('/api/combined/assets').status_code,200)
+        r=client.post('/login',data={'email':service.OWNER_EMAIL,'next':'https://evil.example'},follow_redirects=False)
+        self.assertEqual(r.headers['location'],'/')
+
+    def test_public_files_and_health(self):
+        for path in ['/','/combined.html','/job-client.js','/privacy.html']:
+            self.assertEqual(self.client.get(path).status_code,200,path)
+        for path in ['/app.py','/requirements.txt','/test_combined.py','/customer-account.html']:
+            self.assertEqual(self.client.get(path).status_code,404,path)
+        self.assertTrue(self.client.get('/health').json()['video_tools_ready'])
+
+    def test_invalid_job_ids_and_active_delete(self):
+        self.assertEqual(self.client.get('/api/jobs/not-a-job').status_code,404)
+        self.assertEqual(self.client.delete('/api/jobs/not-a-job').status_code,404)
+        import uuid
+        job_id=uuid.uuid4().hex
+        service.jobs[job_id]={'id':job_id,'status':'processing'}
+        self.assertEqual(self.client.delete('/api/jobs/'+job_id).status_code,409)
+
 if __name__=='__main__':unittest.main()

@@ -53,6 +53,8 @@ publisher_wakeup = threading.Event()
 
 
 def job_state_path(job_id: str) -> Path:
+    if not re.fullmatch(r"[a-f0-9]{32}", job_id):
+        raise HTTPException(404, "Job not found")
     return WORK_ROOT / job_id / "job.json"
 
 
@@ -436,7 +438,10 @@ def safe_text(value: str, fallback: str) -> str:
 
 
 def run(command: list[str]) -> str:
-    completed = subprocess.run(command, capture_output=True, text=True, check=False)
+    try:
+        completed = subprocess.run(command, capture_output=True, text=True, check=False, timeout=1800)
+    except subprocess.TimeoutExpired as exc:
+        raise RuntimeError("Video processing took too long. Please try a shorter video.") from exc
     if completed.returncode:
         message = completed.stderr.strip().splitlines()[-1] if completed.stderr.strip() else "Video processing failed"
         raise RuntimeError(message)
@@ -595,7 +600,7 @@ def process_job(job_id: str, input_path: Path, page_name: str, streamer_name: st
         with processing_slot:
             update_job(job_id, status="processing", progress=5, message="Reading the video")
             duration = probe_duration(input_path)
-            actual_length = max(3, min(clip_length, int(duration)))
+            actual_length = min(clip_length, duration)
             starts, selection_source = highlight_starts(input_path, duration, actual_length, clip_count)
 
             outputs = []
@@ -604,16 +609,18 @@ def process_job(job_id: str, input_path: Path, page_name: str, streamer_name: st
             for index, start in enumerate(starts, 1):
                 output_name = f"clip-{index}.mp4"
                 output_path = job_dir / output_name
-                brand = safe_text(page_name, "My Clips Page")
-                avatar = safe_text((page_name.strip()[:1] or "M").upper(), "M")
+                brand_file = job_dir / "brand.txt"
+                avatar_file = job_dir / "avatar.txt"
+                brand_file.write_text(re.sub(r"[\r\n\x00-\x1f]", "", page_name)[:28] or "My Clips Page", encoding="utf-8")
+                avatar_file.write_text((page_name.strip()[:1] or "M").upper(), encoding="utf-8")
                 vf = (
                     "scale=540:960:force_original_aspect_ratio=decrease,"
                     "pad=540:960:(ow-iw)/2:(oh-ih)/2:color=black,"
                     "drawbox=x=22:y=ih-122:w=496:h=94:color=0x071321@0.92:t=fill,"
                     "drawbox=x=36:y=ih-104:w=58:h=58:color=0x2cb4f3@1:t=fill,"
-                    f"drawtext=fontfile={FONT_PATH}:text='{avatar}':"
+                    f"drawtext=fontfile={FONT_PATH}:textfile={avatar_file}:expansion=none:"
                     "fontcolor=0x071321:fontsize=28:x=55:y=h-98,"
-                    f"drawtext=fontfile={FONT_PATH}:text='{brand}':"
+                    f"drawtext=fontfile={FONT_PATH}:textfile={brand_file}:expansion=none:"
                     "fontcolor=white:fontsize=22:x=108:y=h-101,"
                     "drawtext=fontfile=/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf:"
                     "text='Fresh clips and highlights':fontcolor=0x9fb2ca:fontsize=14:x=108:y=h-70,"
@@ -626,7 +633,7 @@ def process_job(job_id: str, input_path: Path, page_name: str, streamer_name: st
                     "-threads", "1", "-filter_threads", "1", "-filter_complex_threads", "1",
                     "-ss", f"{start:.3f}", "-i", str(input_path), "-t", str(actual_length),
                     "-vf", vf, "-c:v", "libx264", "-threads", "1", "-preset", "ultrafast",
-                    "-tune", "zerolatency", "-crf", "26", "-c:a", "aac", "-b:a", "96k",
+                    "-tune", "zerolatency", "-crf", "26", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k",
                     "-movflags", "+faststart", str(output_path),
                 ])
                 post_title, title_source = generate_post_title(output_path, streamer_name, index, user_id)
@@ -653,13 +660,16 @@ def process_job(job_id: str, input_path: Path, page_name: str, streamer_name: st
                 progress=100,
                 message=f"{len(outputs)} real clips are ready",
                 outputs=outputs,
-                expires_at=int(time.time() + JOB_TTL_SECONDS),
+                expires_at=int(time.time() + (max(JOB_TTL_SECONDS, 86400) if project_id else JOB_TTL_SECONDS)),
             )
             if user_id and project_id:
                 enqueue_outputs(user_id, project_id, job_id, outputs)
     except Exception as exc:
         input_path.unlink(missing_ok=True)
         update_job(job_id, status="failed", progress=100, message=str(exc)[:300])
+    finally:
+        (job_dir / "brand.txt").unlink(missing_ok=True)
+        (job_dir / "avatar.txt").unlink(missing_ok=True)
 
 
 def cleanup_expired() -> None:
@@ -668,7 +678,7 @@ def cleanup_expired() -> None:
         expired: list[str] = []
         with jobs_lock:
             for job_id, job in jobs.items():
-                if job.get("expires_at", job.get("created_at", now) + JOB_TTL_SECONDS) <= now:
+                if job.get("status") not in {"queued", "processing"} and job.get("expires_at", job.get("created_at", now) + JOB_TTL_SECONDS) <= now:
                     expired.append(job_id)
             for job_id in expired:
                 jobs.pop(job_id, None)
@@ -969,19 +979,32 @@ def publisher_loop() -> None:
                 add_event(row["project_id"], f"{row['platform'].title()} post failed: {str(exc)[:180]}", "error")
 
 
+def recover_interrupted_jobs() -> None:
+    for path in WORK_ROOT.glob("*/job.json"):
+        if not re.fullmatch(r"[a-f0-9]{32}", path.parent.name):
+            continue
+        job = load_job_state(path.parent.name)
+        if job and job.get("status") in {"queued", "processing"}:
+            update_job(job["id"], status="failed", progress=100,
+                       message="The server restarted before this video finished. Upload the video again to retry.",
+                       expires_at=int(time.time()) + JOB_TTL_SECONDS)
+
+
 @app.on_event("startup")
 async def startup() -> None:
     initialize_database()
-    for path in WORK_ROOT.glob("*/job.json"):
-        load_job_state(path.parent.name)
+    recover_interrupted_jobs()
     threading.Thread(target=cleanup_expired, daemon=True).start()
     threading.Thread(target=publisher_loop, daemon=True).start()
 
 
 @app.get("/health")
 async def health() -> dict:
+    ready = bool(shutil.which("ffmpeg") and shutil.which("ffprobe"))
     return {
-        "status": "ok",
+        "status": "ok" if ready else "degraded",
+        "version": "1.1.1",
+        "video_tools_ready": ready,
         "engine": "ffmpeg",
         "combined_video": True,
         "automation_queue": True,
@@ -1076,10 +1099,14 @@ async def update_owner_platform_app(platform: str, request: Request):
     return {"saved": True, "platform": platform}
 
 
-def customer_page(filename: str, message: str = "") -> HTMLResponse:
+def login_destination(value: str) -> str:
+    return value if value in {"/", "/combined.html"} else "/"
+
+
+def customer_page(filename: str, message: str = "", next_path: str = "/") -> HTMLResponse:
     template = (BASE_DIR / filename).read_text(encoding="utf-8")
     message_html = f'<div class="message">{message}</div>' if message else ""
-    return HTMLResponse(template.replace("{{MESSAGE}}", message_html))
+    return HTMLResponse(template.replace("{{MESSAGE}}", message_html).replace("{{NEXT}}", login_destination(next_path)))
 
 
 @app.get("/register")
@@ -1115,13 +1142,14 @@ async def customer_register(email: str = Form(...), password: str = Form(...)):
 
 @app.get("/login")
 async def customer_login_page(request: Request):
+    next_path = login_destination(request.query_params.get("next", "/"))
     if current_customer(request):
-        return RedirectResponse("/my-account", status_code=303)
-    return customer_page("customer-login.html")
+        return RedirectResponse(next_path, status_code=303)
+    return customer_page("customer-login.html", next_path=next_path)
 
 
 @app.post("/login")
-async def customer_login(email: str = Form(...), password: str = Form("")):
+async def customer_login(email: str = Form(...), password: str = Form(""), next: str = Form("/")):
     email = email.strip().lower()
     with database() as connection:
         row = connection.execute("SELECT id, email, password_hash FROM users WHERE email = ?", (email,)).fetchone()
@@ -1135,8 +1163,8 @@ async def customer_login(email: str = Form(...), password: str = Form("")):
             ).fetchone()
     owner_login = hmac.compare_digest(email, OWNER_EMAIL)
     if not row or (not owner_login and not check_password(password, row["password_hash"])):
-        return customer_page("customer-login.html", "The email or password is incorrect.")
-    response = RedirectResponse("/", status_code=303)
+        return customer_page("customer-login.html", "The email or password is incorrect.", next_path=next)
+    response = RedirectResponse(login_destination(next), status_code=303)
     response.set_cookie(CUSTOMER_COOKIE, create_customer_session(row["id"], row["email"]), max_age=60 * 60 * 24 * 30,
                         httponly=True, secure=True, samesite="strict")
     return response
@@ -1684,12 +1712,13 @@ async def get_job(job_id: str, request: Request) -> dict:
 
 @app.get("/api/jobs/{job_id}/files/{filename}")
 async def get_file(job_id: str, filename: str) -> FileResponse:
+    job_state_path(job_id)
     if filename not in {f"clip-{index}.mp4" for index in range(1, 6)}:
         raise HTTPException(404, "File not found")
     path = WORK_ROOT / job_id / filename
     if not path.is_file():
         raise HTTPException(404, "File not found or already deleted")
-    return FileResponse(path, media_type="video/mp4", filename=filename)
+    return FileResponse(path, media_type="video/mp4", filename=filename, content_disposition_type="inline")
 
 
 @app.delete("/api/jobs/{job_id}")
@@ -1699,8 +1728,8 @@ async def delete_job(job_id: str, request: Request) -> dict:
         user = current_customer(request)
         if not user or user["id"] != job.get("user_id"):
             raise HTTPException(404, "Job not found")
-        if job["status"] in {"queued", "processing"}:
-            raise HTTPException(409, "Wait until processing finishes before deleting")
+    if job and job["status"] in {"queued", "processing"}:
+        raise HTTPException(409, "Wait until processing finishes before deleting")
     jobs.pop(job_id, None)
     shutil.rmtree(WORK_ROOT / job_id, ignore_errors=True)
     return {"deleted": True}
@@ -1708,4 +1737,13 @@ async def delete_job(job_id: str, request: Request) -> dict:
 
 combined.install(sys.modules[__name__])
 
-app.mount("/", StaticFiles(directory=BASE_DIR, html=True), name="site")
+class PublicFiles(StaticFiles):
+    async def get_response(self, path, scope):
+        allowed = {".", "index.html", "combined.html", "combined.css", "combined.js", "job-client.js",
+                   "app-icon.png", "privacy.html", "terms.html", "data-deletion.html"}
+        if path not in allowed and not re.fullmatch(r"tiktok[A-Za-z0-9]+\.txt", path):
+            raise HTTPException(404, "Not found")
+        return await super().get_response(path, scope)
+
+
+app.mount("/", PublicFiles(directory=BASE_DIR, html=True), name="site")

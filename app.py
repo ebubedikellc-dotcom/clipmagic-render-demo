@@ -16,6 +16,7 @@ import time
 import uuid
 import sys
 import combined
+import posting_accounts
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
@@ -171,6 +172,7 @@ def initialize_database() -> None:
             """
         )
         project_columns = {row[1] for row in connection.execute("PRAGMA table_info(automation_projects)").fetchall()}
+        posting_accounts.migrate(connection)
         if "combined_config" not in project_columns:
             connection.execute("ALTER TABLE automation_projects ADD COLUMN combined_config TEXT")
         if "source_secret" not in project_columns:
@@ -227,9 +229,11 @@ def save_owner_app_credentials(platform: str, client_id: str, client_secret: str
         )
 
 
-def oauth_state(user_id: int, platform: str) -> str:
+def oauth_state(user_id: int, platform: str, return_to: str = "/") -> str:
     expires = int(time.time()) + 900
     nonce = secrets.token_urlsafe(12)
+    if return_to == "/combined.html":
+        nonce = "combined." + nonce
     payload = f"{user_id}|{platform}|{expires}|{nonce}"
     signature = hmac.new(SESSION_SECRET.encode(), payload.encode(), hashlib.sha256).hexdigest()
     return base64.urlsafe_b64encode(f"{payload}|{signature}".encode()).decode()
@@ -252,6 +256,13 @@ def x_pkce_verifier(state: str) -> str:
     """Create a reproducible PKCE verifier without storing temporary browser state."""
     digest = hmac.new(SESSION_SECRET.encode(), f"x-pkce|{state}".encode(), hashlib.sha256).digest()
     return base64.urlsafe_b64encode(digest).decode().rstrip("=")
+
+
+def oauth_return_path(state: str, platform: str) -> str:
+    # Validate the existing signed state before reading the allowlisted return marker.
+    parse_oauth_state(state, platform)
+    nonce = base64.urlsafe_b64decode(state.encode()).decode().rsplit("|", 4)[3]
+    return "/combined.html" if nonce.startswith("combined.") else "/"
 
 
 def save_credentials(user_id: int, platform: str, values: dict) -> None:
@@ -559,10 +570,14 @@ def generate_post_title(video_path: Path, streamer_name: str, index: int, user_i
 def enqueue_outputs(user_id: int, project_id: str, job_id: str, outputs: list[dict]) -> None:
     now = int(time.time())
     with database() as connection:
-        destinations = connection.execute(
-            "SELECT platform FROM project_destinations WHERE project_id = ? AND enabled = 1",
-            (project_id,),
-        ).fetchall()
+        project = connection.execute("SELECT * FROM automation_projects WHERE id=? AND user_id=?", (project_id, user_id)).fetchone()
+    if not project:
+        return
+    destinations = posting_accounts.destinations(sys.modules[__name__], project)
+    if not destinations:
+        add_event(project_id, "Video finished but no authorized destination is connected. Connect an account before uploading again.", "warning")
+        return
+    with database() as connection:
         for output in outputs:
             for destination in destinations:
                 connection.execute(
@@ -571,7 +586,7 @@ def enqueue_outputs(user_id: int, project_id: str, job_id: str, outputs: list[di
                     (uuid.uuid4().hex, user_id, project_id, job_id, output["name"], destination["platform"],
                      output["post_title"], output["hashtags"], now, now, now),
                 )
-    add_event(project_id, f"{len(outputs)} clips created and added to the publishing queue")
+    add_event(project_id, f"{len(outputs)} videos queued for {len(destinations)} connected platforms")
     publisher_wakeup.set()
 
 
@@ -939,7 +954,8 @@ def publisher_loop() -> None:
         now = int(time.time())
         with database() as connection:
             row = connection.execute(
-                "SELECT * FROM publish_queue WHERE status IN ('queued','retry') AND next_attempt_at <= ? ORDER BY created_at LIMIT 1",
+                "SELECT q.* FROM publish_queue q JOIN automation_projects p ON p.id=q.project_id "
+                "WHERE q.status IN ('queued','retry') AND q.next_attempt_at <= ? AND p.status='active' ORDER BY q.created_at LIMIT 1",
                 (now,),
             ).fetchone()
             if row:
@@ -1007,6 +1023,7 @@ async def health() -> dict:
         "video_tools_ready": ready,
         "engine": "ffmpeg",
         "combined_video": True,
+        "combined_social_accounts": True,
         "automation_queue": True,
         "automatic_cleanup": True,
         "temporary_storage": True,
@@ -1204,18 +1221,19 @@ async def oauth_status(request: Request):
 
 @app.get("/api/oauth/{platform}/start")
 async def oauth_start(platform: str, request: Request):
+    return_to = "/combined.html" if request.query_params.get("next") == "/combined.html" else "/"
     customer = current_customer(request)
     if not customer:
-        return RedirectResponse("/login", status_code=303)
+        return RedirectResponse("/login?" + urlencode({"next": return_to}), status_code=303)
     if platform not in SUPPORTED_DESTINATIONS:
         raise HTTPException(404, "Platform not supported")
     if platform not in OAUTH_DESTINATIONS:
-        return RedirectResponse(f"/?connection={platform}&result=credentials_required", status_code=303)
+        return RedirectResponse(f"{return_to}?connection={platform}&result=credentials_required", status_code=303)
     client_id, client_secret = oauth_environment(platform)
     if not client_id or not client_secret:
-        return RedirectResponse(f"/?connection={platform}&result=owner_setup_required", status_code=303)
+        return RedirectResponse(f"{return_to}?connection={platform}&result=owner_setup_required", status_code=303)
     redirect_uri = f"{public_base_url()}/api/oauth/{platform}/callback"
-    state = oauth_state(customer["id"], platform)
+    state = oauth_state(customer["id"], platform, return_to)
     if platform in {"facebook", "instagram"}:
         params = {
             "client_id": client_id,
@@ -1264,8 +1282,9 @@ async def oauth_start(platform: str, request: Request):
 async def oauth_callback(platform: str, request: Request, state: str = "", code: str = "", error: str = ""):
     if platform not in SUPPORTED_DESTINATIONS:
         raise HTTPException(404, "Platform not supported")
+    return_to = oauth_return_path(state, platform) if state else "/"
     if error or not code:
-        return RedirectResponse(f"/?connection={platform}&result=cancelled", status_code=303)
+        return RedirectResponse(f"{return_to}?connection={platform}&result=cancelled", status_code=303)
     user_id = parse_oauth_state(state, platform)
     if platform not in OAUTH_DESTINATIONS:
         raise HTTPException(400, "This platform uses account-specific credentials instead of Connect")
@@ -1348,8 +1367,8 @@ async def oauth_callback(platform: str, request: Request, state: str = "", code:
             raise RuntimeError("The platform did not return posting authorization")
         save_credentials(user_id, platform, values)
     except Exception as exc:
-        return RedirectResponse(f"/?connection={platform}&result=failed", status_code=303)
-    return RedirectResponse(f"/?connection={platform}&result=connected", status_code=303)
+        return RedirectResponse(f"{return_to}?connection={platform}&result=failed", status_code=303)
+    return RedirectResponse(f"{return_to}?connection={platform}&result=connected", status_code=303)
 
 
 @app.delete("/api/oauth/{platform}")
@@ -1442,6 +1461,8 @@ def project_payload(row: sqlite3.Row) -> dict:
             (row["id"],),
         ).fetchall()]
     data = dict(row)
+    if data["destination_mode"] == "all_connected":
+        destinations = posting_accounts.destinations(sys.modules[__name__], row)
     data["monitor_new"] = bool(data["monitor_new"])
     data["import_history"] = bool(data["import_history"])
     data["destinations"] = destinations
@@ -1485,7 +1506,11 @@ async def create_project(request: Request):
         if not isinstance(payload.get("combined"), dict):
             raise HTTPException(400, "Choose your lower video and combined settings")
         combined_config = combined.settings(sys.modules[__name__], customer["id"], payload["combined"])
-    requested = payload.get("destinations") or []
+    destination_mode = payload.get("destination_mode", "selected")
+    if destination_mode not in {"selected", "all_connected"}:
+        raise HTTPException(400, "Choose selected accounts or all connected accounts")
+    requested = (posting_accounts.connected(sys.modules[__name__], customer["id"])
+                 if destination_mode == "all_connected" else payload.get("destinations") or [])
     if not isinstance(requested, list):
         raise HTTPException(400, "Choose at least one destination")
     destinations = []
@@ -1493,8 +1518,8 @@ async def create_project(request: Request):
         if not isinstance(item, dict) or item.get("platform") not in SUPPORTED_DESTINATIONS:
             continue
         link = str(item.get("account_link", "")).strip()
-        if link:
-            destinations.append((item["platform"], link[:1000]))
+        destinations.append((item["platform"], link[:1000]))
+    destinations = list(dict(destinations).items())
     if not destinations:
         raise HTTPException(400, "Save and choose at least one supported destination")
     unauthorized = [platform for platform, _ in destinations
@@ -1521,6 +1546,7 @@ async def create_project(request: Request):
         )
         if combined_config:
             connection.execute("UPDATE automation_projects SET combined_config=? WHERE id=?", (json.dumps(combined_config), project_id))
+        connection.execute("UPDATE automation_projects SET destination_mode=? WHERE id=?", (destination_mode, project_id))
         for platform, link in destinations:
             connection.execute(
                 "INSERT INTO project_destinations (project_id,platform,account_link,enabled) VALUES (?,?,?,1)",
@@ -1537,18 +1563,22 @@ async def update_project(project_id: str, request: Request):
     if not customer:
         raise HTTPException(401, "Please log in")
     payload = await request.json()
-    status = payload.get("status")
+    with database() as connection:
+        current = connection.execute("SELECT * FROM automation_projects WHERE id=? AND user_id=?", (project_id, customer["id"])).fetchone()
+    if not current:
+        raise HTTPException(404, "Connection not found")
+    status = payload.get("status", current["status"])
     if status not in {"active", "paused"}:
         raise HTTPException(400, "Status must be active or paused")
+    mode = payload.get("destination_mode", current["destination_mode"])
+    if mode not in {"selected", "all_connected"}:
+        raise HTTPException(400, "Choose selected accounts or all connected accounts")
     with database() as connection:
-        result = connection.execute(
-            "UPDATE automation_projects SET status=?, updated_at=? WHERE id=? AND user_id=?",
-            (status, int(time.time()), project_id, customer["id"]),
-        )
-        if not result.rowcount:
-            raise HTTPException(404, "Connection not found")
+        connection.execute("UPDATE automation_projects SET status=?,destination_mode=?,updated_at=? WHERE id=? AND user_id=?",
+                           (status, mode, int(time.time()), project_id, customer["id"]))
         row = connection.execute("SELECT * FROM automation_projects WHERE id=?", (project_id,)).fetchone()
-    add_event(project_id, "Automation resumed" if status == "active" else "Automation paused")
+    add_event(project_id, "Posting settings saved" if status == current["status"] else ("Automation resumed" if status == "active" else "Automation paused"))
+    publisher_wakeup.set()
     return project_payload(row)
 
 
@@ -1559,6 +1589,9 @@ async def delete_project(project_id: str, request: Request):
         raise HTTPException(401, "Please log in")
     with database() as connection:
         result = connection.execute("DELETE FROM automation_projects WHERE id=? AND user_id=?", (project_id, customer["id"]))
+        if result.rowcount:
+            connection.execute("UPDATE publish_queue SET status='cancelled',updated_at=? WHERE project_id=? AND user_id=? AND status IN ('queued','retry','blocked')", (int(time.time()),project_id,customer["id"]))
+            connection.execute("DELETE FROM project_destinations WHERE project_id=?", (project_id,))
     if not result.rowcount:
         raise HTTPException(404, "Connection not found")
     return {"deleted": True}
@@ -1615,7 +1648,7 @@ async def ingest_project_video(project_id: str, background_tasks: BackgroundTask
         raise HTTPException(409, "Resume this connection before adding a source video")
     job_id = uuid.uuid4().hex
     input_path = await store_upload(video, job_id)
-    jobs[job_id] = {"id": job_id, "status": "queued", "progress": 0, "message": "Authorized source video queued",
+    jobs[job_id] = {"id": job_id, "user_id": project["user_id"], "project_id": project_id, "mode": "combined" if project["combined_config"] else "normal", "status": "queued", "progress": 0, "message": "Authorized source video queued",
                     "outputs": [], "created_at": int(time.time()), "expires_at": int(time.time() + max(JOB_TTL_SECONDS, 86400))}
     save_job_state(job_id)
     add_event(project_id, "A new authorized source video entered the clip queue")
@@ -1638,7 +1671,7 @@ async def automatic_source_inbox(project_id: str, source_secret: str, background
         raise HTTPException(409, "This clipping connection is paused")
     job_id = uuid.uuid4().hex
     input_path = await store_upload(video, job_id)
-    jobs[job_id] = {"id": job_id, "status": "queued", "progress": 0, "message": "New source video received automatically",
+    jobs[job_id] = {"id": job_id, "user_id": project["user_id"], "project_id": project_id, "mode": "combined" if project["combined_config"] else "normal", "status": "queued", "progress": 0, "message": "New source video received automatically",
                     "outputs": [], "created_at": int(time.time()), "expires_at": int(time.time() + max(JOB_TTL_SECONDS, 86400))}
     save_job_state(job_id)
     add_event(project_id, "A new source video was received automatically", "success")

@@ -82,7 +82,7 @@
       <div class="header-right"><a class="account-link" href="/login">Log in</a><a class="account-link primary" href="/register">Register</a><div class="fuel-badge" id="fuelHeader">⛽ 7,200 fuel</div><div class="status"><i class="dot" id="topDot"></i><span class="status-copy" id="topStatus">Ready to connect</span></div></div>
     </header>
 
-    <nav style="display:flex;gap:12px;margin:20px 0" aria-label="ClipMagic modes"><a class="account-link primary" href="/" aria-current="page">Normal clipping</a><a class="account-link" href="/combined.html">Combined videos</a></nav>
+    <nav style="display:flex;gap:12px;margin:20px 0" aria-label="ClipMagic modes"><a class="account-link primary" href="/" aria-current="page">Normal clipping</a><a class="account-link" href="/combined.html">Combined videos</a><a class="account-link" href="/naming.html">Naming brain</a></nav>
     <section class="topline">
       <div><p class="eyebrow">Working video clipping engine</p><h1>One stream. Every winning moment.</h1><p class="sub">Upload a video now and the server will create real vertical, branded clips that you can play and download.</p></div>
       <div class="mini-stats"><div class="mini"><b id="clipCount">0</b><small>Clips today</small></div><div class="mini"><b id="postCount">0</b><small>Posted</small></div></div>
@@ -93,6 +93,7 @@
       <h2>Upload one of your videos and make clips</h2>
       <p class="engine-copy">The server uses FFmpeg to cut the uploaded video, resize each clip vertically, add your page name and FOLLOW label, and automatically remove temporary files after one hour.</p>
       <form id="engineForm" class="engine-form">
+        <div class="wide"><label for="sourceDescription">Source caption or clip description (used for titles)</label><input id="sourceDescription" name="source_caption" maxlength="8000" placeholder="Describe what happens in this video"></div>
         <div class="wide"><label for="realVideo">Your video file</label><input id="realVideo" name="video" type="file" accept="video/mp4,video/quicktime,video/webm,video/x-matroska" required></div>
         <div><label for="realStreamer">Streamer name</label><input id="realStreamer" name="streamer_name" value="Carter Efe" required></div>
         <div><label for="realPage">Your page name</label><input id="realPage" name="page_name" value="BobbyBets Clips" required></div>
@@ -219,6 +220,7 @@
         const title=document.createElement('strong');title.textContent=item.post_title;
         const tags=document.createElement('span');tags.className='post-tags';tags.textContent=item.hashtags;
         caption.append(label,title,tags);
+        if(item.naming_warning){const warning=document.createElement('small');warning.textContent=item.naming_warning;caption.append(warning)}
         const link=document.createElement('a');link.href=item.url;link.download=item.name;link.textContent='⬇ Download to phone';
         article.append(video,meta,caption,link);clipResults.append(article);
       }

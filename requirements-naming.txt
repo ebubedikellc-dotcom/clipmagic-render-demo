@@ -1,0 +1,5 @@
+--no-binary=llama-cpp-python
+llama-cpp-python==0.3.18
+faster-whisper==1.2.1
+av==16.0.1
+huggingface-hub==0.36.0

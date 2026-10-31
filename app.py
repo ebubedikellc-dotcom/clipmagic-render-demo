@@ -17,6 +17,7 @@ import uuid
 import sys
 import combined
 import posting_accounts
+import naming
 from pathlib import Path
 from urllib.parse import urlencode, urlparse
 
@@ -173,6 +174,7 @@ def initialize_database() -> None:
         )
         project_columns = {row[1] for row in connection.execute("PRAGMA table_info(automation_projects)").fetchall()}
         posting_accounts.migrate(connection)
+        naming.migrate(connection)
         if "combined_config" not in project_columns:
             connection.execute("ALTER TABLE automation_projects ADD COLUMN combined_config TEXT")
         if "source_secret" not in project_columns:
@@ -516,55 +518,15 @@ def update_job(job_id: str, **changes) -> None:
             save_job_state(job_id)
 
 
-def generate_post_title(video_path: Path, streamer_name: str, index: int, user_id: int | None = None) -> tuple[str, str]:
-    """Use speech understanding when configured; always retain a safe offline fallback."""
-    fallbacks = [
-        f"{streamer_name} could not believe this moment",
-        f"{streamer_name}'s reaction says everything",
-        f"Wait for {streamer_name}'s unexpected ending",
-        f"{streamer_name} delivered an unforgettable moment",
-        f"This {streamer_name} highlight deserves a replay",
-    ]
-    title = fallbacks[(index - 1) % len(fallbacks)]
-    api_key = os.environ.get("OPENAI_API_KEY", "").strip()
-    if user_id and not api_key:
-        ai_credentials = credentials_for(user_id, "ai")
-        if (ai_credentials.get("provider") or "").lower() == "openai":
-            api_key = (ai_credentials.get("api_key") or "").strip()
-    if not api_key:
-        return title, "offline-template"
-    try:
-        headers = {"Authorization": f"Bearer {api_key}"}
-        with video_path.open("rb") as media:
-            transcript_response = httpx.post(
-                "https://api.openai.com/v1/audio/transcriptions",
-                headers=headers,
-                files={"file": (video_path.name, media, "video/mp4")},
-                data={"model": os.environ.get("CLIPMAGIC_TRANSCRIBE_MODEL", "gpt-4o-mini-transcribe")},
-                timeout=90,
-            )
-        transcript_response.raise_for_status()
-        transcript = transcript_response.json().get("text", "").strip()
-        if not transcript:
-            return title, "offline-template"
-        prompt = (
-            "Write one accurate, exciting social-video title under 80 characters. "
-            f"Include the creator name {streamer_name}. Do not invent facts. "
-            "Return only the title. Transcript: " + transcript[:5000]
-        )
-        response = httpx.post(
-            "https://api.openai.com/v1/responses",
-            headers={**headers, "Content-Type": "application/json"},
-            json={"model": os.environ.get("CLIPMAGIC_AI_MODEL", "gpt-4.1-mini"), "input": prompt},
-            timeout=60,
-        )
-        response.raise_for_status()
-        generated = response.json().get("output_text", "").strip().strip('"')
-        if generated:
-            return generated[:100], "speech-ai"
-    except Exception:
-        pass
-    return title, "offline-template"
+def generate_post_metadata(video_path, streamer_name, index=1, user_id=None,
+                           workflow="normal", source_caption="", seconds=120):
+    return naming.generate(sys.modules[__name__], video_path, streamer_name, index, user_id,
+                           workflow, source_caption, seconds)
+
+
+def generate_post_title(video_path, streamer_name, index, user_id=None):
+    metadata = generate_post_metadata(video_path, streamer_name, index, user_id)
+    return metadata['title'], metadata['source']
 
 
 def enqueue_outputs(user_id: int, project_id: str, job_id: str, outputs: list[dict]) -> None:
@@ -619,8 +581,6 @@ def process_job(job_id: str, input_path: Path, page_name: str, streamer_name: st
             starts, selection_source = highlight_starts(input_path, duration, actual_length, clip_count)
 
             outputs = []
-            streamer_tag = re.sub(r"[^A-Za-z0-9]", "", streamer_name)[:32] or "Highlights"
-            page_tag = re.sub(r"[^A-Za-z0-9]", "", page_name)[:32] or "Clips"
             for index, start in enumerate(starts, 1):
                 output_name = f"clip-{index}.mp4"
                 output_path = job_dir / output_name
@@ -651,13 +611,15 @@ def process_job(job_id: str, input_path: Path, page_name: str, streamer_name: st
                     "-tune", "zerolatency", "-crf", "26", "-pix_fmt", "yuv420p", "-c:a", "aac", "-b:a", "96k",
                     "-movflags", "+faststart", str(output_path),
                 ])
-                post_title, title_source = generate_post_title(output_path, streamer_name, index, user_id)
+                metadata = generate_post_metadata(output_path, streamer_name, index, user_id,
+                                                  source_caption=source_caption, seconds=actual_length)
                 outputs.append({
                     "name": output_name,
                     "title": f"{streamer_name} highlight {index}",
-                    "post_title": post_title,
-                    "title_source": title_source,
-                    "hashtags": f"#{streamer_tag} #{page_tag} #Highlights #TrendingClips",
+                    "post_title": metadata['title'],
+                    "title_source": metadata['source'],
+                    "hashtags": metadata['hashtags'],
+                    "naming_warning": metadata['warning'],
                     "seconds": actual_length,
                     "selection_source": selection_source,
                     "url": f"/api/jobs/{job_id}/files/{output_name}",
@@ -1024,6 +986,7 @@ async def health() -> dict:
         "engine": "ffmpeg",
         "combined_video": True,
         "combined_social_accounts": True,
+        "naming_assistant": naming.status(),
         "automation_queue": True,
         "automatic_cleanup": True,
         "temporary_storage": True,
@@ -1682,12 +1645,14 @@ async def automatic_source_inbox(project_id: str, source_secret: str, background
 
 @app.post("/api/jobs")
 async def create_job(
+    request: Request,
     background_tasks: BackgroundTasks,
     video: UploadFile = File(...),
     page_name: str = Form("My Clips Page"),
     streamer_name: str = Form("Streamer"),
     clip_count: int = Form(3),
     clip_length: int = Form(30),
+    source_caption: str = Form(""),
 ) -> JSONResponse:
     if clip_count < 1 or clip_count > 5:
         raise HTTPException(400, "Choose between 1 and 5 clips")
@@ -1726,7 +1691,8 @@ async def create_job(
     }
     save_job_state(job_id)
     background_tasks.add_task(
-        process_job, job_id, input_path, page_name, streamer_name, clip_count, clip_length
+        process_job, job_id, input_path, page_name, streamer_name, clip_count, clip_length,
+        (current_customer(request) or {}).get('id'), None, source_caption[:8000]
     )
     return JSONResponse(jobs[job_id], status_code=202)
 
@@ -1769,10 +1735,11 @@ async def delete_job(job_id: str, request: Request) -> dict:
 
 
 combined.install(sys.modules[__name__])
+naming.install(sys.modules[__name__])
 
 class PublicFiles(StaticFiles):
     async def get_response(self, path, scope):
-        allowed = {".", "index.html", "combined.html", "combined.css", "combined.js", "job-client.js",
+        allowed = {".", "index.html", "combined.html", "naming.html", "combined.css", "combined.js", "job-client.js",
                    "app-icon.png", "privacy.html", "terms.html", "data-deletion.html"}
         if path not in allowed and not re.fullmatch(r"tiktok[A-Za-z0-9]+\.txt", path):
             raise HTTPException(404, "Not found")

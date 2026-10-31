@@ -65,6 +65,23 @@ class CombinedTests(unittest.TestCase):
         with self.assertRaises(service.HTTPException):combined.settings(service,2,self.options())
         self.assertEqual(self.client.delete('/api/combined/assets/not-a-uuid').status_code,400)
 
+    def test_combined_naming_preserves_caption_and_uses_source(self):
+        metadata={'title':'Making tomato stew','source':'naming-caption','hashtags':'#Cooking #Stew','warning':''}
+        with patch.object(service,'generate_post_metadata',return_value=metadata) as naming:
+            r=self.client.post('/api/combined/preview',files={'video':('top.mp4',self.top.read_bytes(),'video/mp4')},
+                data={'options':json.dumps(self.options()),'page_name':'Our page','seconds':'3','source_caption':'Original context'})
+        job=self.client.get('/api/jobs/'+r.json()['id']).json()
+        self.assertEqual(job['status'],'completed',job)
+        output=job['outputs'][0]
+        self.assertTrue(output['post_title'].startswith('Making tomato stew'))
+        for text in ['Original context','What do you think?','Our signature']:
+            self.assertIn(text,output['post_title'])
+        self.assertEqual(output['hashtags'],'#Cooking #Stew')
+        self.assertEqual(naming.call_args.kwargs['workflow'],'combined')
+        self.assertEqual(naming.call_args.args[3],1)
+        self.assertEqual(naming.call_args.kwargs['seconds'],3)
+        self.assertNotEqual(Path(naming.call_args.args[0]).name,'clip-1.mp4')
+
     def test_profile_rejects_injection(self):
         for url in ['javascript:alert(1)','https://instagram.com.evil.example/a','http://instagram.com/a','https://user@instagram.com/a']:
             with self.assertRaises(service.HTTPException):combined.profile_url(url)
@@ -107,11 +124,13 @@ class CombinedTests(unittest.TestCase):
             self.assertEqual(r.status_code,202,r.text);process.assert_called_once()
 
     def test_normal_branding_with_punctuation_and_download(self):
-        with patch.object(service,'generate_post_title',return_value=('A test caption','test')):
+        with patch.object(service,'generate_post_metadata',return_value={'title':'A test caption','source':'naming-caption','hashtags':'#Test','warning':''}):
             r=self.client.post('/api/jobs',files={'video':('top.mp4',self.top.read_bytes(),'video/mp4')},
                 data={'page_name':"Frank's Clips: 100%",'clip_count':1,'clip_length':3})
         job=self.client.get('/api/jobs/'+r.json()['id']).json()
         self.assertEqual(job['status'],'completed',job)
+        self.assertEqual(job['outputs'][0]['post_title'],'A test caption')
+        self.assertEqual(job['outputs'][0]['hashtags'],'#Test')
         download=self.client.get(job['outputs'][0]['url'])
         self.assertEqual(download.status_code,200)
         self.assertTrue(download.headers['content-disposition'].startswith('inline'))
@@ -138,7 +157,7 @@ class CombinedTests(unittest.TestCase):
         self.assertEqual(r.headers['location'],'/')
 
     def test_public_files_and_health(self):
-        for path in ['/','/combined.html','/job-client.js','/privacy.html']:
+        for path in ['/','/combined.html','/naming.html','/job-client.js','/privacy.html']:
             self.assertEqual(self.client.get(path).status_code,200,path)
         for path in ['/app.py','/requirements.txt','/test_combined.py','/customer-account.html']:
             self.assertEqual(self.client.get(path).status_code,404,path)

@@ -6,7 +6,7 @@ This repository contains a Render-ready clipping and publishing service.
 - Owner control panel: `/control-panel.html`
 - Registered user workspaces and up to seven saved automation projects.
 - FFmpeg clipping, scene-change selection, vertical formatting and page-name/FOLLOW branding.
-- Optional speech-based title generation when `OPENAI_API_KEY` is configured.
+- Local Qwen titles and hashtags based on clip speech, with separate naming preferences at `/naming.html`. See `NAMING-ASSISTANT.md` for memory and installation requirements.
 - A persistent publishing queue with retries, delivery status and automatic file cleanup.
 - Facebook Page, Instagram Reels, YouTube, TikTok, X and Snapchat Spotlight posting adapters.
 - Official one-tap Meta, Google/YouTube, TikTok, X and Snapchat OAuth connection flows.

@@ -91,8 +91,16 @@ def render(service, job_id, source, user_id, config, page_name, seconds, origina
                         '-crf','26','-pix_fmt','yuv420p','-c:a','aac','-b:a','96k','-movflags','+faststart',str(output)]
             service.run(command)
             text = caption(original, config['addition'], config['signature'])
+            # Describe the TOP clip, never the unrelated reusable lower video/audio.
+            metadata = service.generate_post_metadata(source, page_name, 1, user_id,
+                workflow='combined', source_caption=original, seconds=duration)
+            generated = metadata['source'].startswith('local-qwen-')
+            if generated:
+                text = metadata['title'] + '\n\n' + text
             outputs = [{'name':'clip-1.mp4','title':'Combined video','post_title':text,
-                        'title_source':'source-caption-and-original-addition','hashtags':'',
+                        'title_source':metadata['source'] if generated else 'source-caption-and-original-addition',
+                        'hashtags':metadata['hashtags'] if generated else '',
+                        'naming_warning':metadata['warning'],
                         'seconds':duration,'profile_url':config['profile_url'],
                         'url':f'/api/jobs/{job_id}/files/clip-1.mp4'}]
             service.update_job(job_id,status='completed',progress=100,message='Your combined video is ready',

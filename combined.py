@@ -94,7 +94,7 @@ def render(service, job_id, source, user_id, config, page_name, seconds, origina
             # Describe the TOP clip, never the unrelated reusable lower video/audio.
             metadata = service.generate_post_metadata(source, page_name, 1, user_id,
                 workflow='combined', source_caption=original, seconds=duration)
-            generated = metadata['source'].startswith('local-qwen-')
+            generated = metadata['source'].startswith('naming-')
             if generated:
                 text = metadata['title'] + '\n\n' + text
             outputs = [{'name':'clip-1.mp4','title':'Combined video','post_title':text,

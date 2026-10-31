@@ -66,7 +66,7 @@ class CombinedTests(unittest.TestCase):
         self.assertEqual(self.client.delete('/api/combined/assets/not-a-uuid').status_code,400)
 
     def test_combined_naming_preserves_caption_and_uses_source(self):
-        metadata={'title':'Making tomato stew','source':'local-qwen-speech','hashtags':'#Cooking #Stew','warning':''}
+        metadata={'title':'Making tomato stew','source':'naming-caption','hashtags':'#Cooking #Stew','warning':''}
         with patch.object(service,'generate_post_metadata',return_value=metadata) as naming:
             r=self.client.post('/api/combined/preview',files={'video':('top.mp4',self.top.read_bytes(),'video/mp4')},
                 data={'options':json.dumps(self.options()),'page_name':'Our page','seconds':'3','source_caption':'Original context'})
@@ -124,7 +124,7 @@ class CombinedTests(unittest.TestCase):
             self.assertEqual(r.status_code,202,r.text);process.assert_called_once()
 
     def test_normal_branding_with_punctuation_and_download(self):
-        with patch.object(service,'generate_post_metadata',return_value={'title':'A test caption','source':'local-qwen-speech','hashtags':'#Test','warning':''}):
+        with patch.object(service,'generate_post_metadata',return_value={'title':'A test caption','source':'naming-caption','hashtags':'#Test','warning':''}):
             r=self.client.post('/api/jobs',files={'video':('top.mp4',self.top.read_bytes(),'video/mp4')},
                 data={'page_name':"Frank's Clips: 100%",'clip_count':1,'clip_length':3})
         job=self.client.get('/api/jobs/'+r.json()['id']).json()

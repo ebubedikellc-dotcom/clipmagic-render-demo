@@ -28,7 +28,7 @@ class NamingTests(unittest.TestCase):
         self.client = TestClient(self.service.app)
 
     def test_preferences_isolated_by_owner_and_workflow(self):
-        body = {'workflow': 'normal', 'style': 'Brief factual titles',
+        body = {'workflow': 'normal', 'style': 'brief',
                 'examples': [{'context': 'Planting tomatoes', 'title': 'How to plant tomatoes'}]}
         self.assertEqual(self.client.put('/api/naming/settings', json=body).status_code, 401)
         self.assertEqual(self.client.put('/api/naming/settings', headers={'x-test-user': '1'}, json=body).status_code, 200)
@@ -40,62 +40,49 @@ class NamingTests(unittest.TestCase):
         self.assertEqual(data['style'], body['style'])
 
     def test_settings_validation(self):
-        for body in ({'workflow': 'other'}, {'examples': [{}]}, {'examples': 'bad'}, {'examples': [{}]*7}):
+        for body in ({'workflow': 'other'}, {'examples': [{}]}, {'examples': 'bad'}, {'examples': [{}]*201}, {'style':'anything'}):
             self.assertEqual(self.client.put('/api/naming/settings', headers={'x-test-user': '1'}, json=body).status_code, 400)
 
-    def test_low_memory_does_not_launch_models(self):
-        with patch.object(naming, 'status', return_value={'ready': False, 'reason': 'More memory needed'}), patch.object(naming, 'worker') as worker:
-            result = naming.generate(self.service, Path('clip.mp4'), 'Alice')
-        worker.assert_not_called()
-        self.assertEqual(result['source'], 'neutral-fallback')
-        self.assertIn('memory', result['warning'])
-        self.assertNotIn('unexpected', result['title'])
+    def test_taught_title_and_word_weights(self):
+        examples=[{'context':'The gardener shows pruning roses.','title':'Pruning roses'}]
+        with patch.object(naming,'preferences',return_value={'style':'direct','examples':examples}):
+            exact=naming.generate(self.service,None,'Gardener',source_caption='THE gardener shows pruning roses!')
+            other=naming.generate(self.service,None,'Gardener',source_caption='The gardener does not prune roses.')
+        self.assertEqual(exact['title'],'Pruning roses')
+        self.assertEqual(exact['source'],'naming-taught')
+        self.assertIn('not',other['title'])
+        self.assertNotEqual(other['source'],'naming-taught')
+        self.assertIn('#roses',other['hashtags'])
 
-    def test_clip_evidence_and_saved_style_reach_qwen(self):
-        pref = {'style': 'Factual', 'examples': [{'context': 'Old example', 'title': 'Old title'}]}
-        calls = []
-        def worker(action, payload):
-            calls.append((action, payload))
-            return {'text': 'Add ginger to the soup.'} if action == 'transcribe' else {'title': 'Adding ginger to soup', 'hashtags': ['Soup','Ginger']}
-        with patch.object(naming, 'status', return_value={'ready': True}), patch.object(naming, 'worker', side_effect=worker), patch.object(naming, 'preferences', return_value=pref):
-            result = naming.generate(self.service, Path('specific-clip.mp4'), 'Alice', user_id=7, seconds=12)
-        self.assertEqual(calls[0][1]['video'], 'specific-clip.mp4')
-        self.assertEqual(calls[0][1]['seconds'], 12)
-        self.assertEqual(calls[1][1]['text'], 'Add ginger to the soup.')
-        self.assertEqual(calls[1][1]['examples'], pref['examples'])
-        self.assertEqual(result['source'], 'local-qwen-speech')
-        self.assertEqual(result['hashtags'], '#Soup #Ginger')
+    def test_feedback_changes_sentence_selection_without_copying_facts(self):
+        caption='Oranges grow on trees. Roses grow on bushes.'
+        before=naming.generate(self.service,None,'',source_caption=caption)
+        with patch.object(naming,'preferences',return_value={'style':'direct','examples':[{'context':'Roses bloom on bushes.','title':'Roses bloom'}]}):
+            after=naming.generate(self.service,None,'',source_caption=caption)
+        self.assertEqual(before['title'],'Oranges grow on trees')
+        self.assertEqual(after['title'],'Roses grow on bushes')
+        self.assertNotIn('bloom',after['title'])
 
-    def test_silent_clip_requires_evidence(self):
-        with patch.object(naming, 'status', return_value={'ready': True}), patch.object(naming, 'worker', return_value={'text': ''}) as worker:
-            result = naming.generate(self.service, Path('silent.mp4'), 'Alice')
-        self.assertEqual(worker.call_count, 1)
-        self.assertEqual(result['source'], 'neutral-fallback')
+    def test_no_caption_no_invented_title(self):
+        result=naming.generate(self.service,None,'Alice')
+        self.assertEqual(result['title'],'Alice — clip 1')
+        self.assertEqual(result['source'],'neutral-fallback')
+        self.assertEqual(result['hashtags'],'')
 
-    def test_source_caption_used_for_silent_clip(self):
-        with patch.object(naming, 'status', return_value={'ready': True}), patch.object(naming, 'worker', side_effect=[{'text': ''}, {'title': 'Growing tomatoes', 'hashtags': ['Garden']}]) as worker:
-            result = naming.generate(self.service, Path('silent.mp4'), 'Alice', source_caption='How to grow tomatoes')
-        self.assertEqual(worker.call_args.args[1]['text'], 'How to grow tomatoes')
-        self.assertEqual(result['source'], 'local-qwen-source-caption')
+    def test_preview_private_and_does_not_train_on_itself(self):
+        self.assertEqual(self.client.post('/api/naming/preview',json={'caption':'How to grow tomatoes'}).status_code,401)
+        r=self.client.post('/api/naming/preview',headers={'x-test-user':'1'},json={'caption':'How to grow tomatoes'})
+        self.assertEqual(r.status_code,200)
+        self.assertIn('tomatoes',r.json()['title'])
+        self.assertEqual(naming.preferences(self.service,1,'normal')['examples'],[])
+        self.assertEqual(self.client.put('/api/naming/settings',headers={'x-test-user':'1'},content='bad').status_code,400)
 
-    def test_failure_never_reported_as_ai_success(self):
-        for error in [subprocess.TimeoutExpired('worker', 1), ValueError('bad JSON'), OSError('missing runtime')]:
-            with patch.object(naming, 'status', return_value={'ready': True}), patch.object(naming, 'worker', side_effect=error):
-                result = naming.generate(self.service, Path('clip.mp4'), 'Alice')
-            self.assertEqual(result['source'], 'neutral-fallback')
-            self.assertTrue(result['warning'])
+    def test_brief_and_creator_styles_and_long_input(self):
+        for style in ['brief','creator']:
+            with patch.object(naming,'preferences',return_value={'style':style,'examples':[]}):
+                result=naming.generate(self.service,None,'Alice',source_caption='Tomatoes grow in the garden with plenty of sunshine and regular watering during the summer months.')
+            self.assertLessEqual(len(result['title']),55 if style=='brief' else 80)
+            if style=='creator':self.assertTrue(result['title'].startswith('Alice:'))
+        self.assertNotIn('http',naming.generate(self.service,None,'',source_caption='How to grow tomatoes https://example.com')['title'])
 
-    def test_metadata_limits_and_hashtag_deduplication(self):
-        grounded = naming.clean_metadata({'title':'Goalkeeper saves penalty','hashtags':['Gaming','Goalkeeper','2','relevant','Penalty']},
-                                          'The goalkeeper saves the penalty.')
-        self.assertEqual(grounded['hashtags'], '#Goalkeeper #Penalty')
-        result = naming.clean_metadata({'title': 'A'*100+'\nsecret', 'hashtags': ['#Soup','SOUP','ginger tea','A','B','C','D']})
-        self.assertEqual(len(result['title']), 80)
-        self.assertEqual(result['hashtags'], '#Soup #gingertea #A #B #C')
-        for value in [None, [], {'title': ''}, {'title': '<think>reason'}]:
-            with self.assertRaises(ValueError):
-                naming.clean_metadata(value)
-
-
-if __name__ == '__main__':
-    unittest.main()
+if __name__=='__main__':unittest.main()

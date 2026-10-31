@@ -1645,12 +1645,14 @@ async def automatic_source_inbox(project_id: str, source_secret: str, background
 
 @app.post("/api/jobs")
 async def create_job(
+    request: Request,
     background_tasks: BackgroundTasks,
     video: UploadFile = File(...),
     page_name: str = Form("My Clips Page"),
     streamer_name: str = Form("Streamer"),
     clip_count: int = Form(3),
     clip_length: int = Form(30),
+    source_caption: str = Form(""),
 ) -> JSONResponse:
     if clip_count < 1 or clip_count > 5:
         raise HTTPException(400, "Choose between 1 and 5 clips")
@@ -1689,7 +1691,8 @@ async def create_job(
     }
     save_job_state(job_id)
     background_tasks.add_task(
-        process_job, job_id, input_path, page_name, streamer_name, clip_count, clip_length
+        process_job, job_id, input_path, page_name, streamer_name, clip_count, clip_length,
+        (current_customer(request) or {}).get('id'), None, source_caption[:8000]
     )
     return JSONResponse(jobs[job_id], status_code=202)
 

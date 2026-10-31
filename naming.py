@@ -1,51 +1,16 @@
-"""Small, local caption writer. No remote inference and no invented AI success."""
-import importlib.util
+"""Lightweight extractive naming with explicit customer feedback; no model or network."""
 import json
-import os
-from pathlib import Path
 import re
-import subprocess
-import sys
-import threading
-
+from collections import Counter
 from fastapi import HTTPException, Request
 
-MODEL_FILE = 'qwen2.5-0.5b-instruct-q4_k_m.gguf'
-DEFAULT_STYLE = 'Write a clear, interesting headline describing this clip. Avoid clickbait and invented facts.'
-_slot = threading.Lock()
-
-
-def model_root():
-    return Path(os.environ.get('CLIPMAGIC_MODELS_DIR', '/opt/clipmagic-models'))
-
-
-def memory_limit_mb():
-    limits = []
-    for name in ('/sys/fs/cgroup/memory.max', '/sys/fs/cgroup/memory/memory.limit_in_bytes'):
-        try:
-            value = int(Path(name).read_text().strip())
-            if value < 2**60:
-                limits.append(value // (1024 * 1024))
-        except (ValueError, OSError):
-            pass
-    return min(limits) if limits else None
+DEFAULT_STYLE = 'direct'
+STYLES = {'direct', 'brief', 'creator'}
+STOP = set('a an the and or but to of in on at for with from by is are was were be been it its this that these those i you we they he she my your our their as so then than how what when where why who can could will would should do does did have has had not no yes just very into about today here there video clip watch follow subscribe like share'.split())
 
 
 def status():
-    root = model_root()
-    installed = (root / MODEL_FILE).is_file() and (root / 'speech' / 'model.bin').is_file()
-    dependencies = all(importlib.util.find_spec(name) is not None for name in ('llama_cpp', 'faster_whisper'))
-    memory = memory_limit_mb()
-    if os.environ.get('CLIPMAGIC_NAMING_ENABLED', '1') != '1':
-        reason = 'Naming assistant is switched off.'
-    elif not installed or not dependencies:
-        reason = 'Local naming models or runtime are not installed.'
-    elif memory is not None and memory < 1536:
-        reason = 'This service needs more memory before local AI naming can run (at least 1.5 GB).'
-    else:
-        reason = ''
-    return {'ready': not reason, 'installed': installed and dependencies,
-            'model': 'Qwen2.5-0.5B-Instruct (Q4_K_M)', 'reason': reason}
+    return {'ready': True, 'installed': True, 'model': 'ClipMagic lightweight naming memory', 'reason': ''}
 
 
 def migrate(db):
@@ -57,72 +22,67 @@ def preferences(service, user_id, workflow):
         with service.database() as db:
             row = db.execute('SELECT style,examples FROM naming_preferences WHERE user_id=? AND workflow=?', (user_id, workflow)).fetchone()
         if row:
-            return {'style': row['style'], 'examples': json.loads(row['examples'])}
+            return {'style': row['style'] if row['style'] in STYLES else DEFAULT_STYLE, 'examples': json.loads(row['examples'])}
     return {'style': DEFAULT_STYLE, 'examples': []}
 
 
-def clean_metadata(data, evidence=None):
-    if not isinstance(data, dict) or not isinstance(data.get('title'), str):
-        raise ValueError('No usable title')
-    title = re.sub(r'[\x00-\x1f\x7f]+', ' ', data['title']).strip().strip('"')
-    if not title or '<think>' in title:
-        raise ValueError('No usable title')
-    title = title[:80].strip()
-    tags = []
-    evidence_words = re.sub(r'[^\w]', '', evidence, flags=re.UNICODE).lower() if evidence is not None else None
-    values = data.get('hashtags', [])
-    if not isinstance(values, list):
-        values = []
-    for value in values:
-        if not isinstance(value, str):
-            continue
-        tag = re.sub(r'[^\w]', '', value, flags=re.UNICODE)[:30]
-        if evidence_words is not None and tag.lower() not in evidence_words:
-            continue
-        if (tag and not tag.isdigit() and tag.lower() not in {'short','relevant','tags','hashtag','hashtags'}
-                and tag.lower() not in {t[1:].lower() for t in tags}):
-            tags.append('#' + tag)
-        if len(tags) == 5:
-            break
-    return {'title': title, 'hashtags': ' '.join(tags)}
+def plain(value):
+    value = re.sub(r'https?://\S+|www\.\S+', '', str(value))
+    value = re.sub(r'<[^>]*>', '', value)
+    return re.sub(r'\s+', ' ', value).strip()
 
 
-def worker(action, payload):
-    result = subprocess.run([sys.executable, str(Path(__file__).with_name('naming_worker.py')), action],
-                            input=json.dumps(payload), text=True, capture_output=True,
-                            timeout=180, check=True)
-    return json.loads(result.stdout)
+def words(text):
+    return re.findall(r"[^\W\d_]+", text.casefold(), re.UNICODE)
+
+
+def key(text):
+    # Preserve numbers and negation: similar subjects can describe opposite events.
+    return ' '.join(re.findall(r'\w+', plain(text).casefold(), re.UNICODE))
+
+
+def shorten(text, limit):
+    if len(text) <= limit:
+        return text
+    prefix = text[:limit-1].rsplit(' ', 1)[0]
+    return (prefix or text[:limit-1]) + '…'
 
 
 def generate(service, video, creator, index=1, user_id=None, workflow='normal', source_caption='', seconds=120):
-    fallback = {'title': f'{creator or "Video"} — clip {index}'[:80], 'hashtags': '',
-                'source': 'neutral-fallback', 'warning': ''}
-    readiness = status()
-    if not readiness['ready']:
-        fallback['warning'] = readiness['reason']
-        return fallback
-    # Models live in separate short-lived processes, never concurrently with each other.
-    with _slot:
-        try:
-            transcript = worker('transcribe', {'video': str(video), 'seconds': min(float(seconds), 120),
-                                              'models': str(model_root())}).get('text', '').strip()
-            evidence_source = 'speech'
-            if not transcript:
-                transcript = source_caption.strip()
-                evidence_source = 'source-caption'
-            if len(transcript.split()) < 3:
-                fallback['warning'] = 'No usable speech or source caption; a neutral title was used.'
-                return fallback
-            pref = preferences(service, user_id, workflow)
-            data = worker('generate', {'text': transcript[:3200], 'creator': str(creator)[:70],
-                                      'style': pref['style'], 'examples': pref['examples'][-2:],
-                                      'models': str(model_root())})
-            metadata = clean_metadata(data, transcript)
-            metadata.update(source='local-qwen-' + evidence_source, warning='')
-            return metadata
-        except (OSError, ValueError, TypeError, subprocess.SubprocessError):
-            fallback['warning'] = 'Local AI naming could not finish; a neutral title was used.'
-            return fallback
+    evidence = plain(source_caption[:8000])
+    if len(words(evidence)) < 3:
+        return {'title': shorten(f'{plain(creator) or "Video"} — clip {index}',80), 'hashtags': '',
+                'source': 'neutral-fallback', 'warning': 'Add a source caption or clip description for a meaningful title. This naming system does not watch or listen to video.'}
+    pref = preferences(service, user_id, workflow)
+    seen, chosen = Counter(), Counter()
+    for example in pref['examples']:
+        seen.update(set(words(example['context'])) - STOP)
+        chosen.update((set(words(example['title'])) & set(words(example['context']))) - STOP)
+    # Learn which evidence words the owner keeps in approved titles. Only choose words
+    # from the CURRENT caption, never facts from a related but different example.
+    def weight(word):
+        return 1 + (chosen[word] / seen[word] if seen[word] else 0)
+    sentences = [s.strip() for s in re.split(r'(?<=[.!?])\s+|[\r\n]+', source_caption[:8000]) if len(words(plain(s))) >= 3]
+    sentences = [plain(s) for s in sentences] or [evidence]
+    def score(sentence):
+        tokens = words(sentence)
+        return sum(weight(w) for w in set(tokens) - STOP) / max(1,len(tokens))
+    title = max(sentences, key=score).strip(' .')
+    source = 'naming-caption'
+    for example in reversed(pref['examples']):
+        if key(example['context']) == key(evidence):
+            title = plain(example['title'])
+            source = 'naming-taught'
+            break
+    if pref['style'] == 'creator' and plain(creator):
+        title = plain(creator)[:30] + ': ' + title
+    title = shorten(title,55 if pref['style'] == 'brief' else 80)
+    tokens = [w for w in words(evidence) if len(w)>2 and w not in STOP]
+    frequency = Counter(tokens)
+    ranked = sorted(dict.fromkeys(tokens), key=lambda w: frequency[w]*weight(w), reverse=True)
+    tags = ' '.join('#'+w[:30] for w in ranked[:5])
+    return {'title': title, 'hashtags': tags, 'source': source,
+            'warning': 'Named from supplied text; check that it describes this clip.'}
 
 
 def install(service):
@@ -145,16 +105,21 @@ def install(service):
     @service.app.put('/api/naming/settings')
     async def save_settings(request: Request):
         user = customer(request)
-        if len(await request.body()) > 16000:
+        if len(await request.body()) > 256000:
             raise HTTPException(413, 'Please use shorter examples')
-        data = await request.json()
+        try:
+            data = await request.json()
+        except ValueError:
+            raise HTTPException(400, 'Invalid naming settings')
         if not isinstance(data, dict):
             raise HTTPException(400, 'Invalid naming settings')
         workflow = workflow_name(data.get('workflow', 'normal'))
-        style = str(data.get('style', DEFAULT_STYLE)).strip()[:400] or DEFAULT_STYLE
+        style = data.get('style', DEFAULT_STYLE)
+        if not isinstance(style, str) or style not in STYLES:
+            raise HTTPException(400, 'Choose direct, brief or creator naming style')
         examples = data.get('examples', [])
-        if not isinstance(examples, list) or len(examples) > 6:
-            raise HTTPException(400, 'Save up to six examples per workflow')
+        if not isinstance(examples, list) or len(examples) > 200:
+            raise HTTPException(400, 'Save up to 200 examples per workflow')
         clean = []
         for item in examples:
             if not isinstance(item, dict) or not isinstance(item.get('context'), str) or not isinstance(item.get('title'), str):
@@ -167,3 +132,17 @@ def install(service):
             db.execute('INSERT INTO naming_preferences VALUES(?,?,?,?) ON CONFLICT(user_id,workflow) DO UPDATE SET style=excluded.style,examples=excluded.examples',
                        (user['id'], workflow, style, json.dumps(clean)))
         return {'saved': True}
+
+    @service.app.post('/api/naming/preview')
+    async def preview(request: Request):
+        user = customer(request)
+        if len(await request.body()) > 32000:
+            raise HTTPException(413, 'Please use a shorter caption')
+        try:
+            data = await request.json()
+        except ValueError:
+            raise HTTPException(400, 'Invalid preview')
+        if not isinstance(data, dict) or not isinstance(data.get('caption'), str):
+            raise HTTPException(400, 'Enter a caption')
+        return generate(service, None, str(data.get('creator', ''))[:70], user_id=user['id'],
+                        workflow=workflow_name(data.get('workflow','normal')), source_caption=data['caption'])
